@@ -461,7 +461,7 @@ class Segmentation(SegmentationTaskMixin, Task):
 
         self.model.log(
             f"{self.logging_prefix}TrainSeparationLoss",
-            seg_loss,
+            mixit_loss,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -504,7 +504,7 @@ class Segmentation(SegmentationTaskMixin, Task):
             )
 
         loss = seg_loss + vad_loss + mixit_loss
-
+        breakpoint()
         self.model.log(
             f"{self.logging_prefix}TrainLoss",
             loss,
@@ -621,6 +621,15 @@ class Segmentation(SegmentationTaskMixin, Task):
             prediction_sources, torch.stack((mix1, mix2)).transpose(0, 1)
         )
 
+        self.model.log(
+            f"{self.logging_prefix}ValSeparationLoss",
+            mixit_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        
         self.model.log(
             f"{self.logging_prefix}ValSegLoss",
             seg_loss,
