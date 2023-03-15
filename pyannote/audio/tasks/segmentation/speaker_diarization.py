@@ -610,7 +610,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
         self.model.log(
             f"{self.logging_prefix}TrainSeparationLoss",
-            seg_loss,
+            mixit_loss,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -658,6 +658,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         if torch.isnan(loss):
             return None
 
+        breakpoint()
         self.model.log(
             f"{self.logging_prefix}TrainLoss",
             loss,
@@ -765,6 +766,15 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             prediction_sources, torch.stack((mix1, mix2)).transpose(0, 1)
         )
 
+        self.model.log(
+            f"{self.logging_prefix}ValSeparationLoss",
+            mixit_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        
         self.model.log(
             f"{self.logging_prefix}ValSegLoss",
             seg_loss,
