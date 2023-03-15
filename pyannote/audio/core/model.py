@@ -125,7 +125,7 @@ class Introspection:
             num_samples = (lower + upper) // 2
             try:
                 with torch.no_grad():
-                    frames = model(example_input_array[:, :, :num_samples])
+                    frames, _ = model(example_input_array[:, :, :num_samples])
                 if task is not None:
                     frames = frames[task]
             except Exception:
@@ -150,7 +150,7 @@ class Introspection:
         # we try again without catching the exception to help the end user debug
         # their model
         if min_num_samples is None:
-            frames = model(example_input_array)
+            frames, _ = model(example_input_array)
 
         # corner case for chunk-level tasks
         if specifications.resolution == Resolution.CHUNK:
@@ -174,7 +174,7 @@ class Introspection:
                 requires_grad=False,
             )
             with torch.no_grad():
-                frames = model(example_input_array)
+                frames, _ = model(example_input_array)
             if task is not None:
                 frames = frames[task]
             num_frames = frames.shape[1]
@@ -193,7 +193,7 @@ class Introspection:
                 requires_grad=False,
             )
             with torch.no_grad():
-                frames = model(example_input_array)
+                frames, _ = model(example_input_array)
             if task is not None:
                 frames = frames[task]
             num_frames = frames.shape[1]

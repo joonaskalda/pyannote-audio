@@ -13,7 +13,7 @@
 # copies or substantial portions of the Software.
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIESOF MERCHANTABILITY,
 # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
@@ -53,6 +53,7 @@ from pyannote.audio.torchmetrics import (
 from pyannote.audio.utils.loss import binary_cross_entropy, mse_loss, nll_loss
 from pyannote.audio.utils.permutation import permutate
 from pyannote.audio.utils.powerset import Powerset
+from asteroid.losses import MixITLossWrapper, multisrc_neg_sisdr
 
 Subsets = list(Subset.__args__)
 Scopes = list(Scope.__args__)
@@ -186,6 +187,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         self.balance = balance
         self.weight = weight
         self.vad_loss = vad_loss
+        self.separation_loss = MixITLossWrapper(multisrc_neg_sisdr, generalized=True)
 
     def setup(self, stage: Optional[str] = None):
 
@@ -424,6 +426,11 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
         return torch.from_numpy(np.stack(collated_y))
 
+    # def separation_loss(self, prediction, target):
+    #     mixit_loss = MixITLossWrapper(multisrc_neg_sisdr, generalized=True) 
+    #     return mixit_loss
+        
+
     def segmentation_loss(
         self,
         permutated_prediction: torch.Tensor,
@@ -548,9 +555,16 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         # corner case
         if not keep.any():
             return None
-
+        # TODO: pair up waveforms for MIXIT
+        bsz = waveform.shape[0]
+        mix1 = waveform[bsz // 2 :].squeeze(1)
+        mix2 = waveform[: bsz // 2].squeeze(1)
+        moms = mix1 + mix2
         # forward pass
-        prediction = self.model(waveform)
+        # TODO: model should output predictions for estimated sources as well
+        prediction, _ = self.model(waveform)
+        _, prediction_sources = self.model(moms)
+
         batch_size, num_frames, _ = prediction.shape
         # (batch_size, num_frames, num_classes)
 
@@ -589,6 +603,20 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 permutated_prediction, target, weight=weight
             )
 
+        # TODO: add also separation loss, warmup?
+        mixit_loss = self.separation_loss(
+            prediction_sources, torch.stack((mix1, mix2)).transpose(0, 1)
+        )
+
+        self.model.log(
+            f"{self.logging_prefix}TrainSeparationLoss",
+            seg_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+
         self.model.log(
             f"{self.logging_prefix}TrainSegLoss",
             seg_loss,
@@ -624,7 +652,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 logger=True,
             )
 
-        loss = seg_loss + vad_loss
+        loss = seg_loss + vad_loss + mixit_loss
 
         # skip batch if something went wrong for some reason
         if torch.isnan(loss):
@@ -685,8 +713,14 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         # waveform = waveform[keep]
         # target = target[keep]
 
+        bsz = waveform.shape[0]
+        mix1 = waveform[bsz // 2 :].squeeze(1)
+        mix2 = waveform[: bsz // 2].squeeze(1)
+        moms = mix1 + mix2
+
         # forward pass
-        prediction = self.model(waveform)
+        prediction, _ = self.model(waveform)
+        _, prediction_sources = self.model(moms)
         batch_size, num_frames, _ = prediction.shape
 
         # frames weight
@@ -727,6 +761,10 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 permutated_prediction, target, weight=weight
             )
 
+        mixit_loss = self.separation_loss(
+            prediction_sources, torch.stack((mix1, mix2)).transpose(0, 1)
+        )
+
         self.model.log(
             f"{self.logging_prefix}ValSegLoss",
             seg_loss,
@@ -762,7 +800,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 logger=True,
             )
 
-        loss = seg_loss + vad_loss
+        loss = seg_loss + vad_loss + mixit_loss
 
         self.model.log(
             f"{self.logging_prefix}ValLoss",
