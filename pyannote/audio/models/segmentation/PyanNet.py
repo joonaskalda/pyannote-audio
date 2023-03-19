@@ -66,10 +66,10 @@ class PyanNet(Model):
 
     SINCNET_DEFAULTS = {"stride": 10}
     ENCODER_DECODER_DEFAULTS = {
-        "fb_name": "stft",
-        "kernel_size": 512,
+        "fb_name": "free",
+        "kernel_size": 60,
         "n_filters": 512,
-        "stride": 256,
+        "stride": 30,
     }
     LSTM_DEFAULTS = {
         "hidden_size": 128,
@@ -95,6 +95,7 @@ class PyanNet(Model):
         self,
         encoder_decoder: dict = None,
         lstm: dict = None,
+        sincnet: dict = None,
         linear: dict = None,
         convnet: dict = None,
         free_encoder: dict = None,
@@ -107,12 +108,16 @@ class PyanNet(Model):
 
         super().__init__(sample_rate=sample_rate, num_channels=num_channels, task=task)
 
+        sincnet = merge_dict(self.SINCNET_DEFAULTS, sincnet)
+        sincnet["sample_rate"] = sample_rate
         lstm = merge_dict(self.LSTM_DEFAULTS, lstm)
         lstm["batch_first"] = True
         linear = merge_dict(self.LINEAR_DEFAULTS, linear)
         convnet = merge_dict(self.CONVNET_DEFAULTS, convnet)
         encoder_decoder = merge_dict(self.ENCODER_DECODER_DEFAULTS, encoder_decoder)
-        self.save_hyperparameters("encoder_decoder", "lstm", "linear", "convnet")
+        self.save_hyperparameters("encoder_decoder", "lstm", "linear", "convnet", "sincnet")
+
+        self.sincnet = SincNet(**self.hparams.sincnet)
 
         if encoder_decoder["fb_name"] == "free":
             n_feats_out = encoder_decoder["n_filters"]
@@ -124,12 +129,17 @@ class PyanNet(Model):
             sample_rate=sample_rate, **self.hparams.encoder_decoder
         )
         self.convnet = TDConvNet(n_feats_out, **self.hparams.convnet)
+        #self.conv1d = nn.Conv1d(3072, 256, 9, stride=9)
+        self.pool1d = nn.AvgPool1d(9, stride=9, padding=0)
+        #self.pool1d.append(nn.MaxPool1d(3, stride=3, padding=0, dilation=1))
+        #self.norm1d = nn.InstanceNorm1d(256, affine=True)
+        self.linear_encode = nn.Linear(6 * n_feats_out, 60)
 
         monolithic = lstm["monolithic"]
         if monolithic:
             multi_layer_lstm = dict(lstm)
             del multi_layer_lstm["monolithic"]
-            self.lstm = nn.LSTM(6 * n_feats_out, **multi_layer_lstm)
+            self.lstm = nn.LSTM(120, **multi_layer_lstm)
 
         else:
             num_layers = lstm["num_layers"]
@@ -200,8 +210,9 @@ class PyanNet(Model):
         -------
         scores : (batch, frame, classes)
         """
-
         tf_rep = self.encoder(waveforms)
+        # breakpoint()
+        sincnet_features = self.sincnet(waveforms)
         masks = self.convnet(tf_rep)
 
         masked_tf_rep = masks * tf_rep.unsqueeze(1)
@@ -212,6 +223,15 @@ class PyanNet(Model):
             masks, "batch nsrc nfilters nframes -> batch nframes nfilters nsrc"
         )
         outputs = torch.flatten(outputs, start_dim=2, end_dim=3)
+    
+        outputs = rearrange(outputs, "b t f -> b f t")
+        outputs=self.pool1d(outputs)
+        sincnet_features = pad_x_to_y(sincnet_features, outputs)
+        outputs = rearrange(outputs, "b f t -> b t f")
+        sincnet_features = rearrange(sincnet_features, "b f t -> b t f")
+        outputs = F.leaky_relu(self.linear_encode(outputs))
+        outputs = torch.cat((outputs,sincnet_features), dim=-1)
+        breakpoint()
 
         if self.hparams.lstm["monolithic"]:
             outputs, _ = self.lstm(outputs)
@@ -225,4 +245,4 @@ class PyanNet(Model):
             for linear in self.linear:
                 outputs = F.leaky_relu(linear(outputs))
 
-        return self.activation(self.classifier(outputs)), decoded_sources
+        return  , decoded_sources
