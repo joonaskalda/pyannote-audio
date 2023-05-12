@@ -30,6 +30,7 @@ from typing import Dict, Optional, Sequence, Union
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from pyannote.core import Segment, SlidingWindow, SlidingWindowFeature
 from pyannote.database.protocol import SegmentationProtocol, SpeakerDiarizationProtocol
 from pyannote.database.protocol.protocol import Scope, Subset
 from pytorch_lightning.loggers import MLFlowLogger, TensorBoardLogger
@@ -503,6 +504,17 @@ class SegmentationTaskMixin:
                     second_chunk["meta"]["mixture_type"]="second_mixture"
                     yield second_chunk
 
+                    # add previous two chunks to get a third one
+                    third_chunk = dict()
+                    third_chunk["X"] = first_chunk["X"] + second_chunk["X"]
+                    third_chunk["meta"] = first_chunk["meta"].copy()
+                    y = np.concatenate((first_chunk["y"].data, second_chunk["y"].data), axis=1)
+                    frames = first_chunk["y"].sliding_window
+                    labels = first_chunk["y"].labels + second_chunk["y"].labels
+                    third_chunk["y"] = SlidingWindowFeature(y, frames, labels=labels)
+                    third_chunk["meta"]["mixture_type"]="mom"
+                    yield third_chunk
+                    
                 else:
                     # merge segments that contain repeated speakers
                     merged_repeated_segments = [[repeated_speaker_annotations["start"][0],repeated_speaker_annotations["end"][0]]]
@@ -547,6 +559,17 @@ class SegmentationTaskMixin:
                         second_chunk = self.prepare_chunk(file_id, new_start_time, duration)
                         second_chunk["meta"]["mixture_type"]="second_mixture"
                         yield second_chunk
+
+                        #add previous two chunks to get a third one
+                        third_chunk = dict()
+                        third_chunk["X"] = first_chunk["X"] + second_chunk["X"]
+                        third_chunk["meta"] = first_chunk["meta"].copy()
+                        y = np.concatenate((first_chunk["y"].data, second_chunk["y"].data), axis=1)
+                        frames = first_chunk["y"].sliding_window
+                        labels = first_chunk["y"].labels + second_chunk["y"].labels
+                        third_chunk["y"] = SlidingWindowFeature(y, frames, labels=labels)
+                        third_chunk["meta"]["mixture_type"]="mom"
+                        yield third_chunk
 
     def train__iter__(self):
         """Iterate over training samples
