@@ -344,6 +344,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         num_samples = sample["X"].shape[1]
         num_frames, _ = self.model.introspection(num_samples)
         resolution = duration / num_frames
+        resolution_samples = duration / num_samples
+
         frames = SlidingWindow(start=0.0, duration=resolution, step=resolution)
 
         # gather all annotations of current file
@@ -354,11 +356,13 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             (annotations["start"] < chunk.end) & (annotations["end"] > chunk.start)
         ]
 
-        # discretize chunk annotations at model output resolution
+        # discretize chunk annotations at model output and input resolutions
         start = np.maximum(chunk_annotations["start"], chunk.start) - chunk.start
         start_idx = np.floor(start / resolution).astype(int)
+        start_idx_samples = np.floor(start / resolution_samples).astype(int)
         end = np.minimum(chunk_annotations["end"], chunk.end) - chunk.start
         end_idx = np.ceil(end / resolution).astype(int)
+        end_idx_samples = np.floor(end / resolution_samples).astype(int)
 
         # get list and number of labels for current scope
         labels = list(np.unique(chunk_annotations[label_scope_key]))
@@ -369,6 +373,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
         # initial frame-level targets
         y = np.zeros((num_frames, num_labels), dtype=np.uint8)
+        sample_level_labels = np.zeros((num_samples, num_labels), dtype=np.uint8)
 
         # map labels to indices
         mapping = {label: idx for idx, label in enumerate(labels)}
@@ -379,8 +384,15 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             mapped_label = mapping[label]
             y[start:end, mapped_label] = 1
 
-        sample["y"] = SlidingWindowFeature(y, frames, labels=labels)
+        for start, end, label in zip(
+            start_idx_samples, end_idx_samples, chunk_annotations[label_scope_key]
+        ):
+            mapped_label = mapping[label]
+            sample_level_labels[start:end, mapped_label] = 1
 
+        sample["y"] = SlidingWindowFeature(y, frames, labels=labels)
+        # only frames with a single label should be used for mixit training
+        sample["X_separation_mask"] = torch.from_numpy(sample_level_labels.sum(axis=1) == 1)
         metadata = self.metadata[file_id]
         sample["meta"] = {key: metadata[key] for key in metadata.dtype.names}
         sample["meta"]["file"] = file_id
@@ -560,10 +572,20 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
         # forward pass
         bsz = waveform.shape[0]
+        num_samples = waveform.shape[2]
         mix1 = waveform[0::3].squeeze(1)
         mix2 = waveform[1::3].squeeze(1)
+        # extract parts with only one speaker from original mixtures
+        mix1_masks = batch["X_separation_mask"][0::3]
+        mix2_masks = batch["X_separation_mask"][1::3]
+        mix1_masked = mix1 * mix1_masks
+        mix2_masked = mix2 * mix2_masks
+
         moms = mix1 + mix2
-        _, prediction_sources = self.model(moms)
+        
+        _, predicted_sources_mom = self.model(moms)
+        _, predicted_sources_mix1 = self.model(mix1)
+        _, predicted_sources_mix2 = self.model(mix2)
 
         # don't use moms with more than max_speakers_per_chunk speakers for training speaker diarization
         num_speakers: torch.Tensor = torch.sum(torch.any(target, dim=1), dim=1)
@@ -610,10 +632,14 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             seg_loss = self.segmentation_loss(
                 permutated_prediction, target, weight=weight
             )
-
+        # contributions from original mixtures is weighed by the proportion of remaining frames
         mixit_loss = self.separation_loss(
-            prediction_sources, torch.stack((mix1, mix2)).transpose(0, 1)
-        )
+            predicted_sources_mom, torch.stack((mix1, mix2)).transpose(0, 1)
+        ) + self.separation_loss(
+            predicted_sources_mix1, torch.stack((mix1_masked, torch.zeros_like(mix1))).transpose(0, 1)
+        ) * mix1_masks.sum() / num_samples / bsz * 3 + self.separation_loss(
+            predicted_sources_mix2, torch.stack((mix2_masked, torch.zeros_like(mix2))).transpose(0, 1)
+        ) * mix2_masks.sum() / num_samples / bsz * 3
 
         self.model.log(
             f"{self.logging_prefix}TrainSeparationLoss",
@@ -727,7 +753,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
         # forward pass
         prediction, _ = self.model(waveform)
-        _, prediction_sources = self.model(moms)
+        _, predicted_sources_mom = self.model(moms)
         batch_size, num_frames, _ = prediction.shape
 
         # frames weight
@@ -769,7 +795,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             )
 
         mixit_loss = self.separation_loss(
-            prediction_sources, torch.stack((mix1, mix2)).transpose(0, 1)
+            predicted_sources_mom, torch.stack((mix1, mix2)).transpose(0, 1)
         )
 
         self.model.log(
