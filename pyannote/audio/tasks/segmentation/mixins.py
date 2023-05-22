@@ -494,6 +494,9 @@ class SegmentationTaskMixin:
                     labels = first_chunk["y"].labels + second_chunk["y"].labels
                     third_chunk["y"] = SlidingWindowFeature(y, frames, labels=labels)
                     third_chunk["meta"]["mixture_type"]="mom"
+
+                    # the whole mom should be used in the separation branch training
+                    third_chunk["X_separation_mask"] = torch.ones_like(first_chunk["X_separation_mask"])
                     yield third_chunk
                     
                 else:
@@ -550,6 +553,9 @@ class SegmentationTaskMixin:
                         labels = first_chunk["y"].labels + second_chunk["y"].labels
                         third_chunk["y"] = SlidingWindowFeature(y, frames, labels=labels)
                         third_chunk["meta"]["mixture_type"]="mom"
+
+                        # the whole mom should be used in the separation branch training
+                        third_chunk["X_separation_mask"] = torch.ones_like(first_chunk["X_separation_mask"])
                         yield third_chunk
 
     def train__iter__(self):
@@ -604,6 +610,9 @@ class SegmentationTaskMixin:
     def collate_meta(self, batch) -> torch.Tensor:
         return default_collate([b["meta"] for b in batch])
 
+    def collate_X_separation_mask(self, batch) -> torch.Tensor:
+        return default_collate([b["X_separation_mask"] for b in batch])
+
     def collate_fn(self, batch, stage="train"):
         """Collate function used for most segmentation tasks
 
@@ -633,6 +642,8 @@ class SegmentationTaskMixin:
         # collate metadata
         collated_meta = self.collate_meta(batch)
 
+        collated_X_separation_mask = self.collate_X_separation_mask(batch)
+
         # apply augmentation (only in "train" stage)
         self.augmentation.train(mode=(stage == "train"))
         augmented = self.augmentation(
@@ -645,6 +656,7 @@ class SegmentationTaskMixin:
             "X": augmented.samples,
             "y": augmented.targets.squeeze(1),
             "meta": collated_meta,
+            "X_separation_mask" : collated_X_separation_mask
         }
 
     def train__len__(self):
