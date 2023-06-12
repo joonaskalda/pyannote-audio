@@ -13,51 +13,44 @@
 
 - fix(pipeline): fix WeSpeaker GPU support
 
-## Version 3.0.0 (2023-09-26)
+  - BREAKING(task): rename `Segmentation` task to `SpeakerDiarization`
+  - BREAKING(task): remove support for variable chunk duration for segmentation tasks
+  - BREAKING(pipeline): pipeline defaults to CPU (use `pipeline.to(device)`)
+  - BREAKING(pipeline): remove `SpeakerSegmentation` pipeline (use `SpeakerDiarization` pipeline)
+  - BREAKING(pipeline): remove support for `FINCHClustering` and `HiddenMarkovModelClustering`
+  - BREAKING(pipeline): remove `segmentation_duration` parameter from `SpeakerDiarization` pipeline (defaults to `duration` of segmentation model)
+  - BREAKING(setup): drop support for Python 3.7
+  - BREAKING(io): channels are now 0-indexed (used to be 1-indexed)
+  - BREAKING(io): multi-channel audio is no longer downmixed to mono by default.
+    You should update how `pyannote.audio.core.io.Audio` is instantiated:
+    * replace `Audio()` by `Audio(mono="downmix")`;
+    * replace `Audio(mono=True)` by `Audio(mono="downmix")`;
+    * replace `Audio(mono=False)` by `Audio()`.
+  - BREAKING(model): get rid of (flaky) `Model.introspection`
+    If, for some weird reason, you wrote some custom code based on that,
+    you should instead rely on `Model.example_output`.
+
 
 ### Features and improvements
 
-- feat(pipeline): send pipeline to device with `pipeline.to(device)`
-- feat(pipeline): add `return_embeddings` option to `SpeakerDiarization` pipeline
-- feat(pipeline): make `segmentation_batch_size` and `embedding_batch_size` mutable in `SpeakerDiarization` pipeline (they now default to `1`)
-- feat(pipeline): add progress hook to pipelines
-- feat(task): add [powerset](https://www.isca-speech.org/archive/interspeech_2023/plaquet23_interspeech.html) support to `SpeakerDiarization` task
-- feat(task): add support for multi-task models
-- feat(task): add support for label scope in speaker diarization task
-- feat(task): add support for missing classes in multi-label segmentation task
-- feat(model): add segmentation model based on torchaudio self-supervised representation
-- feat(pipeline): check version compatibility at load time
-- improve(task): load metadata as tensors rather than pyannote.core instances
-- improve(task): improve error message on missing specifications
-
-### Breaking changes
-
-- BREAKING(task): rename `Segmentation` task to `SpeakerDiarization`
-- BREAKING(pipeline): pipeline defaults to CPU (use `pipeline.to(device)`)
-- BREAKING(pipeline): remove `SpeakerSegmentation` pipeline (use `SpeakerDiarization` pipeline)
-- BREAKING(pipeline): remove `segmentation_duration` parameter from `SpeakerDiarization` pipeline (defaults to `duration` of segmentation model)
-- BREAKING(task): remove support for variable chunk duration for segmentation tasks
-- BREAKING(pipeline): remove support for `FINCHClustering` and `HiddenMarkovModelClustering`
-- BREAKING(setup): drop support for Python 3.7
-- BREAKING(io): channels are now 0-indexed (used to be 1-indexed)
-- BREAKING(io): multi-channel audio is no longer downmixed to mono by default.
-  You should update how `pyannote.audio.core.io.Audio` is instantiated:
-  - replace `Audio()` by `Audio(mono="downmix")`;
-  - replace `Audio(mono=True)` by `Audio(mono="downmix")`;
-  - replace `Audio(mono=False)` by `Audio()`.
-- BREAKING(model): get rid of (flaky) `Model.introspection`
-  If, for some weird reason, you wrote some custom code based on that,
-  you should instead rely on `Model.example_output`.
-- BREAKING(interactive): remove support for Prodigy recipes
+  - feat(task): add support for multi-task models
+  - feat(pipeline): send pipeline to device with `pipeline.to(device)`
+  - feat(pipeline): make `segmentation_batch_size` and `embedding_batch_size` mutable in `SpeakerDiarization` pipeline (they now default to `1`)
+  - feat(task): add [powerset](https://arxiv.org/PLACEHOLDER) support to `SpeakerDiarization` task
+  - feat(pipeline): add progress hook to pipelines
+  - feat(pipeline): check version compatibility at load time
+  - feat(task): add support for label scope in speaker diarization task
+  - feat(task): add support for missing classes in multi-label segmentation task
+  - improve(task): load metadata as tensors rather than pyannote.core instances
+  - improve(task): improve error message on missing specifications
 
 ### Fixes and improvements
 
-- fix(pipeline): fix reproducibility issue with Ampere CUDA devices
-- fix(pipeline): fix support for IOBase audio
-- fix(pipeline): fix corner case with no speaker
-- fix(train): prevent metadata preparation to happen twice
-- fix(task): fix support for "balance" option
-- improve(task): shorten and improve structure of Tensorboard tags
+  - fix(pipeline): fix reproducibility issue with Ampere CUDA devices
+  - fix(pipeline): fix support for IOBase audio
+  - fix(pipeline): fix corner case with no speaker
+  - fix(train): prevent metadata preparation to happen twice
+  - improve(task): shorten and improve structure of Tensorboard tags
 
 ### Dependencies update
 
