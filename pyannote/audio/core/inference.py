@@ -262,19 +262,17 @@ class Inference(BaseInference):
         step_size: int = round(self.step * sample_rate)
         _, num_samples = waveform.shape
 
-        frames = self.model.example_output.frames
-
         def __frames(
-            frames, specifications: Optional[Specifications] = None
+            example_output, specifications: Optional[Specifications] = None
         ) -> SlidingWindow:
             if specifications.resolution == Resolution.CHUNK:
                 return SlidingWindow(start=0.0, duration=self.duration, step=self.step)
-            return frames
+            return example_output.frames
 
         frames: Union[SlidingWindow, Tuple[SlidingWindow]] = map_with_specifications(
             self.model.specifications,
             __frames,
-            self.model.example_output.frames,
+            self.model.example_output,
         )
 
         # prepare complete chunks
