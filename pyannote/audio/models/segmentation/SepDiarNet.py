@@ -40,6 +40,7 @@ from asteroid.masknn import DPRNN
 from asteroid_filterbanks import FreeFB, Encoder, Decoder
 from pyannote.audio.utils.powerset import Powerset
 
+
 class SepDiarNet(Model):
     """PyanNet segmentation model
 
@@ -125,7 +126,9 @@ class SepDiarNet(Model):
         convnet = merge_dict(self.CONVNET_DEFAULTS, convnet)
         dprnn = merge_dict(self.DPRNN_DEFAULTS, dprnn)
         encoder_decoder = merge_dict(self.ENCODER_DECODER_DEFAULTS, encoder_decoder)
-        self.save_hyperparameters("encoder_decoder", "lstm", "linear", "convnet", "dprnn")
+        self.save_hyperparameters(
+            "encoder_decoder", "lstm", "linear", "convnet", "dprnn"
+        )
         self.n_src = n_sources
 
         if encoder_decoder["fb_name"] == "free":
@@ -134,7 +137,9 @@ class SepDiarNet(Model):
             self.encoder = Encoder(fb)
             # Filters between encoder and decoder should not be shared.
             if encoder_decoder["use_diarization_info"]:
-                encoder_decoder['n_filters'] += self.specifications[0].num_powerset_classes
+                encoder_decoder["n_filters"] += self.specifications[
+                    0
+                ].num_powerset_classes
             fb = FreeFB(sample_rate=sample_rate, **self.hparams.encoder_decoder)
             self.decoder = Decoder(fb)
 
@@ -148,7 +153,7 @@ class SepDiarNet(Model):
             raise ValueError("Filterbank type not recognized.")
 
         self.masker = DPRNN(n_feats_out, n_src=n_sources, **self.hparams.dprnn)
-        #self.convnet= TDConvNet(n_feats_out, **self.hparams.convnet)
+        # self.convnet= TDConvNet(n_feats_out, **self.hparams.convnet)
 
         monolithic = lstm["monolithic"]
         if monolithic:
@@ -252,7 +257,7 @@ class SepDiarNet(Model):
         if self.hparams.linear["num_layers"] > 0:
             for linear in self.linear:
                 outputs = F.leaky_relu(linear(outputs))
-        
+
         outputs = self.classifier(outputs)
 
         masked_tf_rep = masks * tf_rep.unsqueeze(1)
@@ -265,7 +270,7 @@ class SepDiarNet(Model):
             diarization_info = diarization_info.unsqueeze(1)
             # (batch, 1, n_classes, n_frames)
             diarization_info = diarization_info.expand(-1, self.n_src, -1, -1)
-            combined_decoder_input = torch.cat((diarization_info, masked_tf_rep), dim = 2)
+            combined_decoder_input = torch.cat((diarization_info, masked_tf_rep), dim=2)
             decoded_sources = self.decoder(combined_decoder_input)
         else:
             decoded_sources = self.decoder(masked_tf_rep)
