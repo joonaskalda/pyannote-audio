@@ -37,7 +37,8 @@ from asteroid.masknn.convolutional import TDConvNet
 from asteroid_filterbanks import make_enc_dec
 from asteroid.utils.torch_utils import pad_x_to_y
 from asteroid.masknn import DPRNN
-
+from asteroid_filterbanks import FreeFB, Encoder, Decoder
+from pyannote.audio.utils.powerset import Powerset
 
 class SepDiarNet(Model):
     """PyanNet segmentation model
@@ -71,6 +72,7 @@ class SepDiarNet(Model):
         "kernel_size": 512,
         "n_filters": 512,
         "stride": 256,
+        "use_diarization_info": True,
     }
     LSTM_DEFAULTS = {
         "hidden_size": 128,
@@ -124,16 +126,27 @@ class SepDiarNet(Model):
         dprnn = merge_dict(self.DPRNN_DEFAULTS, dprnn)
         encoder_decoder = merge_dict(self.ENCODER_DECODER_DEFAULTS, encoder_decoder)
         self.save_hyperparameters("encoder_decoder", "lstm", "linear", "convnet", "dprnn")
+        self.n_src = n_sources
 
         if encoder_decoder["fb_name"] == "free":
             n_feats_out = encoder_decoder["n_filters"]
+            fb = FreeFB(sample_rate=sample_rate, **self.hparams.encoder_decoder)
+            self.encoder = Encoder(fb)
+            # Filters between encoder and decoder should not be shared.
+            if encoder_decoder["use_diarization_info"]:
+                encoder_decoder['n_filters'] += self.specifications[0].num_powerset_classes
+            fb = FreeFB(sample_rate=sample_rate, **self.hparams.encoder_decoder)
+            self.decoder = Decoder(fb)
+
         elif encoder_decoder["fb_name"] == "stft":
-            n_feats_out = int(2 * (encoder_decoder["n_filters"] / 2 + 1))
+            # n_feats_out = int(2 * (encoder_decoder["n_filters"] / 2 + 1))
+            # self.encoder, self.decoder = make_enc_dec(
+            # sample_rate=sample_rate, **self.hparams.encoder_decoder
+            # )
+            raise NotImplementedError("STFT encoder not implemented.")
         else:
             raise ValueError("Filterbank type not recognized.")
-        self.encoder, self.decoder = make_enc_dec(
-            sample_rate=sample_rate, **self.hparams.encoder_decoder
-        )
+
         self.masker = DPRNN(n_feats_out, n_src=n_sources, **self.hparams.dprnn)
         #self.convnet= TDConvNet(n_feats_out, **self.hparams.convnet)
 
@@ -156,7 +169,7 @@ class SepDiarNet(Model):
             self.lstm = nn.ModuleList(
                 [
                     nn.LSTM(
-                        6 * n_feats_out
+                        n_sources * n_feats_out
                         if i == 0
                         else lstm["hidden_size"] * (2 if lstm["bidirectional"] else 1),
                         **one_layer_lstm
@@ -182,6 +195,10 @@ class SepDiarNet(Model):
                     * self.hparams.linear["num_layers"]
                 )
             ]
+        )
+        self.powerset = Powerset(
+            len(self.specifications[0].classes),
+            self.specifications[0].powerset_max_classes,
         )
 
     def build(self):
@@ -217,11 +234,7 @@ class SepDiarNet(Model):
 
         tf_rep = self.encoder(waveforms)
         masks = self.masker(tf_rep)
-
-        masked_tf_rep = masks * tf_rep.unsqueeze(1)
-        decoded_sources = self.decoder(masked_tf_rep)
-        decoded_sources = pad_x_to_y(decoded_sources, waveforms)
-        decoded_sources = decoded_sources.transpose(1, 2)
+        # (batch, nsrc, nfilters, nframes)
 
         outputs = rearrange(
             masks, "batch nsrc nfilters nframes -> batch nframes nfilters nsrc"
@@ -239,5 +252,25 @@ class SepDiarNet(Model):
         if self.hparams.linear["num_layers"] > 0:
             for linear in self.linear:
                 outputs = F.leaky_relu(linear(outputs))
+        
+        outputs = self.classifier(outputs)
 
-        return self.activation[0](self.classifier(outputs)), decoded_sources
+        masked_tf_rep = masks * tf_rep.unsqueeze(1)
+
+        if self.hparams.encoder_decoder["use_diarization_info"]:
+            # concatenate the masked TF representation with the diarization info for alignment
+            multilabel_outputs = self.powerset.to_multilabel(outputs)
+            diarization_info = multilabel_outputs.transpose(1, 2)
+            # (batch, n_classes, n_frames)
+            diarization_info = diarization_info.unsqueeze(1)
+            # (batch, 1, n_classes, n_frames)
+            diarization_info = diarization_info.expand(-1, self.n_src, -1, -1)
+            combined_decoder_input = torch.cat((diarization_info, masked_tf_rep), dim = 2)
+            decoded_sources = self.decoder(combined_decoder_input)
+        else:
+            decoded_sources = self.decoder(masked_tf_rep)
+        # outputs = self.classifier(outputs)
+        decoded_sources = pad_x_to_y(decoded_sources, waveforms)
+        decoded_sources = decoded_sources.transpose(1, 2)
+
+        return self.activation[0](outputs), decoded_sources
