@@ -826,11 +826,11 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         # contributions from original mixtures is weighed by the proportion of remaining frames
         mixit_loss = self.separation_loss(
             predicted_sources_mom.transpose(1, 2), torch.stack((mix1, mix2)).transpose(0, 1)
-        ) + self.separation_loss(
-            predicted_sources_mix1.transpose(1, 2), torch.stack((mix1_masked, torch.zeros_like(mix1))).transpose(0, 1)
-        ) * mix1_masks.sum() / num_samples / bsz * 3 + self.separation_loss(
-            predicted_sources_mix2.transpose(1, 2), torch.stack((mix2_masked, torch.zeros_like(mix2))).transpose(0, 1)
-        ) * mix2_masks.sum() / num_samples / bsz * 3
+        ) # + self.separation_loss(
+        #     predicted_sources_mix1.transpose(1, 2), torch.stack((mix1_masked, torch.zeros_like(mix1))).transpose(0, 1)
+        # ) * mix1_masks.sum() / num_samples / bsz * 3 + self.separation_loss(
+        #     predicted_sources_mix2.transpose(1, 2), torch.stack((mix2_masked, torch.zeros_like(mix2))).transpose(0, 1)
+        # ) * mix2_masks.sum() / num_samples / bsz * 3
 
         self.model.log(
             "loss/train/separation",
