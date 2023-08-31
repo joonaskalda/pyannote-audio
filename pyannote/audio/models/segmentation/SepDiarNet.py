@@ -114,9 +114,10 @@ class SepDiarNet(Model):
         task: Optional[Task] = None,
         encoder_type: str = None,
         n_sources: int = 3,
+        lr: float = 1e-3,
     ):
         super().__init__(sample_rate=sample_rate, num_channels=num_channels, task=task)
-
+        self.learning_rate = lr
         lstm = merge_dict(self.LSTM_DEFAULTS, lstm)
         lstm["batch_first"] = True
         linear = merge_dict(self.LINEAR_DEFAULTS, linear)
@@ -241,3 +242,10 @@ class SepDiarNet(Model):
                 outputs = F.leaky_relu(linear(outputs))
 
         return self.activation[0](self.classifier(outputs)), decoded_sources
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, patience=5, factor=0.5, verbose=True
+        )
+        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val_loss"}
