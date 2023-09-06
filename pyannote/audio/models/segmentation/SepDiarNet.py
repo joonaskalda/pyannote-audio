@@ -248,4 +248,4 @@ class SepDiarNet(Model):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, patience=5, factor=0.5, verbose=True
         )
-        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val_loss"}
+        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": 'loss/val/separation'}
