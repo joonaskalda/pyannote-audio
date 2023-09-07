@@ -284,7 +284,9 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         speaker_diarization = Specifications(
             duration=self.duration,
             resolution=Resolution.FRAME,
-            problem=Problem.MONO_LABEL_CLASSIFICATION,
+            problem=Problem.MULTI_LABEL_CLASSIFICATION
+            if self.max_speakers_per_frame is None
+            else Problem.MONO_LABEL_CLASSIFICATION,
             permutation_invariant=True,
             classes=[f"speaker#{i+1}" for i in range(self.max_speakers_per_chunk)],
             powerset_max_classes=self.max_speakers_per_frame,
