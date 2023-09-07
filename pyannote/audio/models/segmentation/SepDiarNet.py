@@ -139,6 +139,11 @@ class SepDiarNet(Model):
         )
         self.masker = DPRNN(n_feats_out, n_src=n_sources, **self.hparams.dprnn)
         #self.convnet= TDConvNet(n_feats_out, **self.hparams.convnet)
+                
+        # diarization can use a lower resolution than separation
+        diarization_scaling = int(256 / encoder_decoder["kernel_size"])
+        self.average_pool = nn.AvgPool1d(diarization_scaling, stride=diarization_scaling)
+        
         if use_lstm:
             monolithic = lstm["monolithic"]
             if monolithic:
@@ -229,11 +234,9 @@ class SepDiarNet(Model):
         decoded_sources = self.decoder(masked_tf_rep)
         decoded_sources = pad_x_to_y(decoded_sources, waveforms)
         decoded_sources = decoded_sources.transpose(1, 2)
-
-        outputs = rearrange(
-            masks, "batch nsrc nfilters nframes -> batch nsrc nframes nfilters"
-        )
-        outputs = torch.flatten(outputs, start_dim=0, end_dim=1)
+        outputs = torch.flatten(masks, start_dim=0, end_dim=1)
+        outputs = self.average_pool(outputs)
+        outputs = outputs.transpose(1, 2)
         if self.use_lstm:
             if self.hparams.lstm["monolithic"]:
                 outputs, _ = self.lstm(outputs)
