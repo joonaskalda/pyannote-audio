@@ -466,97 +466,38 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
                 previous_speaker_labels = list(np.unique(chunk_annotations["file_label_idx"]))
                 repeated_speaker_annotations = annotations[np.isin(annotations["file_label_idx"], previous_speaker_labels)]
                 
-                if repeated_speaker_annotations.size == 0:
-                    # if previous chunk has 0 speakers then just sample from all annotated regions again
-                    first_chunk = self.prepare_chunk(file_id, start_time, duration)
-                    first_chunk["meta"]["mixture_type"]="first_mixture"
-                    yield first_chunk
+                # if previous chunk has 0 speakers then just sample from all annotated regions again
+                first_chunk = self.prepare_chunk(file_id, start_time, duration)
+                first_chunk["meta"]["mixture_type"]="first_mixture"
+                yield first_chunk
 
-                    # selected one annotated region at random (with probability proportional to its duration)
-                    annotated_region_index = np.random.choice(
-                        annotated_region_indices, p=prob_annotated_regions_duration
-                    )
+                # selected one annotated region at random (with probability proportional to its duration)
+                annotated_region_index = np.random.choice(
+                    annotated_region_indices, p=prob_annotated_regions_duration
+                )
 
-                    # select one chunk at random in this annotated region
-                    _, _, start, end = self.annotated_regions[annotated_region_index]
-                    start_time = rng.uniform(start, end - duration)
+                # select one chunk at random in this annotated region
+                _, _, start, end = self.annotated_regions[annotated_region_index]
+                start_time = rng.uniform(start, end - duration)
 
-                    second_chunk = self.prepare_chunk(file_id, start_time, duration)
-                    second_chunk["meta"]["mixture_type"]="second_mixture"
-                    yield second_chunk
+                second_chunk = self.prepare_chunk(file_id, start_time, duration)
+                second_chunk["meta"]["mixture_type"]="second_mixture"
+                yield second_chunk
 
-                    # add previous two chunks to get a third one
-                    third_chunk = dict()
-                    third_chunk["X"] = first_chunk["X"] + second_chunk["X"]
-                    third_chunk["meta"] = first_chunk["meta"].copy()
-                    y = np.concatenate((first_chunk["y"].data, second_chunk["y"].data), axis=1)
-                    frames = first_chunk["y"].sliding_window
-                    labels = first_chunk["y"].labels + second_chunk["y"].labels
-                    third_chunk["y"] = SlidingWindowFeature(y, frames, labels=labels)
-                    third_chunk["meta"]["mixture_type"]="mom"
+                # add previous two chunks to get a third one
+                third_chunk = dict()
+                third_chunk["X"] = first_chunk["X"] + second_chunk["X"]
+                third_chunk["meta"] = first_chunk["meta"].copy()
+                y = np.concatenate((first_chunk["y"].data, second_chunk["y"].data), axis=1)
+                frames = first_chunk["y"].sliding_window
+                labels = first_chunk["y"].labels + second_chunk["y"].labels
+                third_chunk["y"] = SlidingWindowFeature(y, frames, labels=labels)
+                third_chunk["meta"]["mixture_type"]="mom"
 
-                    # the whole mom should be used in the separation branch training
-                    third_chunk["X_separation_mask"] = torch.ones_like(first_chunk["X_separation_mask"])
-                    yield third_chunk
+                # the whole mom should be used in the separation branch training
+                third_chunk["X_separation_mask"] = torch.ones_like(first_chunk["X_separation_mask"])
+                yield third_chunk
                     
-                else:
-                    # merge segments that contain repeated speakers
-                    merged_repeated_segments = [[repeated_speaker_annotations["start"][0],repeated_speaker_annotations["end"][0]]]
-                    for _, start, end, _, _, _ in repeated_speaker_annotations:
-                        previous = merged_repeated_segments[-1]
-                        if start <= previous[1]:
-                            previous[1] = max(previous[1], end)
-                        else:
-                            merged_repeated_segments.append([start, end])
-                    
-                    # find segments that don't contain repeated speakers
-                    segments_without_repeat = []
-                    current_region_index = 0
-                    previous_time = self.annotated_regions["start"][annotated_region_indices[0]]
-                    for segment in merged_repeated_segments:
-                        if segment[0] > self.annotated_regions["end"][annotated_region_indices[current_region_index]]:
-                            current_region_index+=1
-                            previous_time = self.annotated_regions["start"][annotated_region_indices[current_region_index]]
-                        
-                        if segment[0] - previous_time > duration:
-                            segments_without_repeat.append((previous_time, segment[0], segment[0] - previous_time))
-                        previous_time = segment[1]
-                    
-                    dtype = [("start", "f"), ("end", "f"),("duration", "f")]
-                    segments_without_repeat = np.array(segments_without_repeat,dtype=dtype)
-
-                    if np.sum(segments_without_repeat["duration"]) != 0:
-
-                        # only yield chunks if it is possible to choose the second chunk so that yielded chunks are always paired
-
-                        first_chunk = self.prepare_chunk(file_id, start_time, duration)
-                        first_chunk["meta"]["mixture_type"]="first_mixture"
-                        yield first_chunk
-
-                        prob_segments_duration = segments_without_repeat["duration"] / np.sum(segments_without_repeat["duration"])
-                        segment = np.random.choice(
-                            segments_without_repeat, p=prob_segments_duration
-                        )
-
-                        start, end, _ = segment
-                        new_start_time = rng.uniform(start, end - duration)
-                        second_chunk = self.prepare_chunk(file_id, new_start_time, duration)
-                        second_chunk["meta"]["mixture_type"]="second_mixture"
-                        yield second_chunk
-
-                        #add previous two chunks to get a third one
-                        third_chunk = dict()
-                        third_chunk["X"] = first_chunk["X"] + second_chunk["X"]
-                        third_chunk["meta"] = first_chunk["meta"].copy()
-                        y = np.concatenate((first_chunk["y"].data, second_chunk["y"].data), axis=1)
-                        frames = first_chunk["y"].sliding_window
-                        labels = first_chunk["y"].labels + second_chunk["y"].labels
-                        third_chunk["y"] = SlidingWindowFeature(y, frames, labels=labels)
-                        third_chunk["meta"]["mixture_type"]="mom"
-
-                        # the whole mom should be used in the separation branch training
-                        third_chunk["X_separation_mask"] = torch.ones_like(first_chunk["X_separation_mask"])
-                        yield third_chunk
 
     def collate_X_separation_mask(self, batch) -> torch.Tensor:
         return default_collate([b["X_separation_mask"] for b in batch])
@@ -758,13 +699,6 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
 
         # drop samples that contain too many speakers
         num_speakers: torch.Tensor = torch.sum(torch.any(target, dim=1), dim=1)
-        keep: torch.Tensor = num_speakers <= self.max_speakers_per_chunk
-        target = target[keep]
-        waveform = waveform[keep]
-
-        # corner case
-        if not keep.any():
-            return None
 
         # forward pass
         bsz = waveform.shape[0]
@@ -786,9 +720,7 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         # don't use moms with more than max_speakers_per_chunk speakers for training speaker diarization
         num_speakers: torch.Tensor = torch.sum(torch.any(target, dim=1), dim=1)
         num_speakers[2::3] = num_speakers[::3] + num_speakers[1::3]
-        keep: torch.Tensor = num_speakers <= self.max_speakers_per_chunk
-        target = target[keep]
-        waveform = waveform[keep]
+
         prediction, _ = self.model(waveform)
 
         batch_size, num_frames, _ = prediction.shape
