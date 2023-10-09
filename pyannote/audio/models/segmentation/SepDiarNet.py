@@ -162,7 +162,7 @@ class SepDiarNet(Model):
                 nn.Linear(in_features, out_features)
                 for in_features, out_features in pairwise(
                     [
-                        lstm_out_features,
+                        lstm_out_features*2,
                     ]
                     + [self.hparams.linear["hidden_size"]]
                     * self.hparams.linear["num_layers"]
@@ -202,6 +202,7 @@ class SepDiarNet(Model):
         outputs = torch.flatten(masked_tf_rep, start_dim=0, end_dim=1)
         # shape (batch * nsrc, nfilters, nframes)
         outputs = self.average_pool(outputs)
+        outputs = torch.cat((outputs, tf_rep.repeat(3,1,1)), dim=1)
         outputs = outputs.transpose(1, 2)
         # shape (batch, nframes, nfilters)
         if self.use_lstm:
