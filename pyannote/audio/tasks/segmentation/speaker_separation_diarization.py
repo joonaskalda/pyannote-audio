@@ -165,7 +165,7 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         max_num_speakers: int = None,  # deprecated in favor of `max_speakers_per_chunk``
         loss: Literal["bce", "mse"] = None,  # deprecated
         separation_loss_weight: float = 0.5,
-        original_mixtures_for_separation: bool = True,
+        original_mixtures_for_separation: bool = False,
         forced_alignment_weight: float = 0.0,
         add_noise_sources: bool = False,
     ):
