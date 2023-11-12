@@ -26,6 +26,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchaudio
 from einops import rearrange
 from pyannote.core.utils.generators import pairwise
 
@@ -141,15 +142,12 @@ class SepDiarNet(Model):
         self.encoder, self.decoder = make_enc_dec(
             sample_rate=sample_rate, **self.hparams.encoder_decoder
         )
-        self.masker = DPRNN(128, out_chan=64, n_src=n_sources, **self.hparams.dprnn)
+        self.masker = DPRNN(64 + 64, out_chan=64, n_src=n_sources, **self.hparams.dprnn)
 
         from transformers import AutoProcessor, AutoModel
 
-        #processor = AutoProcessor.from_pretrained("microsoft/wavlm-large")
+        # processor = AutoProcessor.from_pretrained("microsoft/wavlm-large")
         self.wavlm = AutoModel.from_pretrained("microsoft/wavlm-large")
-        self.wavlm.eval()
-        for param in self.wavlm.parameters():
-            param.requires_grad = False
         self.wavlm_linear = linear = nn.Linear(1024, 64)
         # diarization can use a lower resolution than separation, use 128x downsampling
         diarization_scaling = int(128 / encoder_decoder["stride"])
@@ -165,7 +163,7 @@ class SepDiarNet(Model):
             lstm_out_features = lstm["hidden_size"] * (
                 2 if lstm["bidirectional"] else 1
             )
-        
+
         self.linear = nn.ModuleList(
             [
                 nn.Linear(in_features, out_features)
@@ -203,7 +201,13 @@ class SepDiarNet(Model):
         bsz = waveforms.shape[0]
         tf_rep = self.encoder(waveforms)
         wavlm_rep = self.wavlm(waveforms.squeeze(1)).last_hidden_state
+        # wavlm_rep, _ = self.wav2vec.extract_features(
+        #     waveforms.squeeze(1), num_layers=num_layers
+        # )
         wavlm_rep = self.wavlm_linear(wavlm_rep)
+        # wavlm_rep = torch.stack(wavlm_rep, dim=-1) @ F.softmax(
+        #     self.wav2vec_weights, dim=0
+        # )
         wavlm_rep = wavlm_rep.transpose(1, 2)
         wavlm_rep = wavlm_rep.repeat_interleave(self.wavlm_scaling, dim=-1)
         wavlm_rep = pad_x_to_y(wavlm_rep, tf_rep)
@@ -227,7 +231,7 @@ class SepDiarNet(Model):
         if not self.use_lstm and self.hparams.linear["num_layers"] == 0:
             outputs = (outputs**2).sum(dim=2).unsqueeze(-1)
         outputs = self.classifier(outputs)
-        
+
         outputs = outputs.reshape(bsz, self.n_sources, -1)
         outputs = outputs.transpose(1, 2)
 

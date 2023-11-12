@@ -441,7 +441,7 @@ class Task(pl.LightningDataModule):
 
     # default training_step provided for convenience
     # can obviously be overriden for each task
-    def training_step(self, batch, batch_idx: int):
+    def training_step(self, batch, batch_idx: int, optimizer_idx):
         return self.common_step(batch, batch_idx, "train")
 
     def val__getitem__(self, idx):

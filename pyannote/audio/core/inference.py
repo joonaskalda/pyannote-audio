@@ -262,7 +262,7 @@ class Inference(BaseInference):
         step_size: int = round(self.step * sample_rate)
         _, num_samples = waveform.shape
 
-        frames = self.model.example_output.frames
+        # frames = self.model.example_output.frames
 
         def __frames(
             frames, specifications: Optional[Specifications] = None
