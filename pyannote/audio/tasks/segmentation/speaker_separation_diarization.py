@@ -1067,7 +1067,7 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
             target,
         )
 
-    def training_step(self, batch, batch_idx: int):
+    def training_step(self, batch, batch_idx, optimizer_idx):
         """Compute permutation-invariant segmentation loss
 
         Parameters
