@@ -1233,6 +1233,7 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         # if bsz not even, then leave out last sample
         if bsz % 2 != 0:
             waveform = waveform[:-1]
+            target = target[:-1]
 
         num_samples = waveform.shape[2]
         mix1 = waveform[0::2].squeeze(1)
@@ -1276,9 +1277,10 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
             )
         else:
             permutated_diarization, permutations = permutate(target, diarization)
-
+        # permutations = torch.argsort(torch.tensor(permutations))
         mom_permutations = permutations[bsz:]
         seg_loss = self.segmentation_loss(permutated_diarization, target, weight=weight)
+        # mom_permutations = bsz//2*[(0,1,2)]
 
         if self.force_alignment:
             speaker_idx_mix1 = [
@@ -1332,7 +1334,7 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
                     est_mix2 = mom_sources[i, :, speaker_idx_mix2[i]].sum(1)
                     est_mixes.append(torch.stack((est_mix1, est_mix2)))
             est_mixes = torch.stack(est_mixes)
-            separation_loss = self.pit_sep_loss(
+            separation_loss = multisrc_neg_sisdr(
                 est_mixes, torch.stack((mix1, mix2)).transpose(0, 1)
             ).mean()
         else:
@@ -1435,108 +1437,6 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
                 ]:
                     self.num_total21 += 1
                 self.num_total += 1
-            if self.num_total30 > 0:
-                self.model.log(
-                    "accuracy/3_0",
-                    self.num_correct30 / self.num_total30,
-                    on_step=False,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                )
-            if self.num_total20 > 0:
-                self.model.log(
-                    "accuracy/2_0",
-                    self.num_correct20 / self.num_total20,
-                    on_step=False,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                )
-            if self.num_total10 > 0:
-                self.model.log(
-                    "accuracy/1_0",
-                    self.num_correct10 / self.num_total10,
-                    on_step=False,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                )
-            if self.num_total11 > 0:
-                self.model.log(
-                    "accuracy/1_1",
-                    self.num_correct11 / self.num_total11,
-                    on_step=False,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                )
-            if self.num_total21 > 0:
-                self.model.log(
-                    "accuracy/2_1",
-                    self.num_correct21 / self.num_total21,
-                    on_step=False,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                )
-            if self.num_total > 0:
-                self.model.log(
-                    "accuracy/total",
-                    self.num_correct / self.num_total,
-                    on_step=False,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                )
-            self.model.log(
-                "counts/3_0",
-                self.num_total30,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
-            self.model.log(
-                "counts/2_0",
-                self.num_total20,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
-            self.model.log(
-                "counts/1_0",
-                self.num_total10,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
-            self.model.log(
-                "counts/1_1",
-                self.num_total11,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
-            self.model.log(
-                "counts/2_1",
-                self.num_total21,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
-            self.model.log(
-                "counts/total",
-                self.num_total,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
 
         return (
             seg_loss,
@@ -1623,6 +1523,109 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         )
         wavlm_opt.step()
         rest_opt.step()
+
+        if self.num_total30 > 0:
+            self.model.log(
+                "accuracy/3_0",
+                self.num_correct30 / self.num_total30,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+        if self.num_total20 > 0:
+            self.model.log(
+                "accuracy/2_0",
+                self.num_correct20 / self.num_total20,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+        if self.num_total10 > 0:
+            self.model.log(
+                "accuracy/1_0",
+                self.num_correct10 / self.num_total10,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+        if self.num_total11 > 0:
+            self.model.log(
+                "accuracy/1_1",
+                self.num_correct11 / self.num_total11,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+        if self.num_total21 > 0:
+            self.model.log(
+                "accuracy/2_1",
+                self.num_correct21 / self.num_total21,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+        if self.num_total > 0:
+            self.model.log(
+                "accuracy/total",
+                self.num_correct / self.num_total,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+        self.model.log(
+            "counts/3_0",
+            self.num_total30,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.model.log(
+            "counts/2_0",
+            self.num_total20,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.model.log(
+            "counts/1_0",
+            self.num_total10,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.model.log(
+            "counts/1_1",
+            self.num_total11,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.model.log(
+            "counts/2_1",
+            self.num_total21,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.model.log(
+            "counts/total",
+            self.num_total,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
 
         return {"loss": loss}
 
