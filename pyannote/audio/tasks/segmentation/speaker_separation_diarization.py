@@ -1245,12 +1245,10 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
             num_active_speakers_mix1,
             num_active_speakers_mix2,
         ) = self.create_mixtures_of_mixtures(mix1, mix2, target[0::2], target[1::2])
-        target = torch.cat((target[0::2], target[1::2], mom_target), dim=0)
+        target = mom_target
+        diarization, sources = self.model(mom)
 
-        diarization, sources = self.model(torch.cat((mix1, mix2, mom), dim=0))
-        mix1_sources = sources[: bsz // 2]
-        mix2_sources = sources[bsz // 2 : bsz]
-        mom_sources = sources[bsz:]
+        mom_sources = sources
 
         batch_size, num_frames, _ = diarization.shape
         # (batch_size, num_frames, num_classes)
@@ -1278,7 +1276,7 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         else:
             permutated_diarization, permutations = permutate(target, diarization)
         # permutations = torch.argsort(torch.tensor(permutations))
-        mom_permutations = permutations[bsz:]
+        mom_permutations = permutations
         seg_loss = self.segmentation_loss(permutated_diarization, target, weight=weight)
         # mom_permutations = bsz//2*[(0,1,2)]
 
@@ -1340,7 +1338,7 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         else:
             separation_loss, mixit_partitions = self.mixit_loss(
                 mom_sources.transpose(1, 2), torch.stack((mix1, mix2)).transpose(0, 1)
-            ).mean()
+            )
         _, mixit_partitions = self.mixit_loss(
             mom_sources[:, :, :3].transpose(1, 2),
             torch.stack((mix1, mix2)).transpose(0, 1),
@@ -1523,109 +1521,109 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         )
         wavlm_opt.step()
         rest_opt.step()
-
-        if self.num_total30 > 0:
+        if self.log_alignment_accuracy:
+            if self.num_total30 > 0:
+                self.model.log(
+                    "accuracy/3_0",
+                    self.num_correct30 / self.num_total30,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                )
+            if self.num_total20 > 0:
+                self.model.log(
+                    "accuracy/2_0",
+                    self.num_correct20 / self.num_total20,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                )
+            if self.num_total10 > 0:
+                self.model.log(
+                    "accuracy/1_0",
+                    self.num_correct10 / self.num_total10,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                )
+            if self.num_total11 > 0:
+                self.model.log(
+                    "accuracy/1_1",
+                    self.num_correct11 / self.num_total11,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                )
+            if self.num_total21 > 0:
+                self.model.log(
+                    "accuracy/2_1",
+                    self.num_correct21 / self.num_total21,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                )
+            if self.num_total > 0:
+                self.model.log(
+                    "accuracy/total",
+                    self.num_correct / self.num_total,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                )
             self.model.log(
-                "accuracy/3_0",
-                self.num_correct30 / self.num_total30,
+                "counts/3_0",
+                self.num_total30,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
             )
-        if self.num_total20 > 0:
             self.model.log(
-                "accuracy/2_0",
-                self.num_correct20 / self.num_total20,
+                "counts/2_0",
+                self.num_total20,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
             )
-        if self.num_total10 > 0:
             self.model.log(
-                "accuracy/1_0",
-                self.num_correct10 / self.num_total10,
+                "counts/1_0",
+                self.num_total10,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
             )
-        if self.num_total11 > 0:
             self.model.log(
-                "accuracy/1_1",
-                self.num_correct11 / self.num_total11,
+                "counts/1_1",
+                self.num_total11,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
             )
-        if self.num_total21 > 0:
             self.model.log(
-                "accuracy/2_1",
-                self.num_correct21 / self.num_total21,
+                "counts/2_1",
+                self.num_total21,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
             )
-        if self.num_total > 0:
             self.model.log(
-                "accuracy/total",
-                self.num_correct / self.num_total,
+                "counts/total",
+                self.num_total,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
             )
-        self.model.log(
-            "counts/3_0",
-            self.num_total30,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
-        self.model.log(
-            "counts/2_0",
-            self.num_total20,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
-        self.model.log(
-            "counts/1_0",
-            self.num_total10,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
-        self.model.log(
-            "counts/1_1",
-            self.num_total11,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
-        self.model.log(
-            "counts/2_1",
-            self.num_total21,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
-        self.model.log(
-            "counts/total",
-            self.num_total,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
 
         return {"loss": loss}
 
@@ -1731,47 +1729,47 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         )
 
         # reshape target so that there is one line per class when plotting it
-        y[y == 0] = np.NaN
-        if len(y.shape) == 2:
-            y = y[:, :, np.newaxis]
-        y *= np.arange(y.shape[2])
+        # y[y == 0] = np.NaN
+        # if len(y.shape) == 2:
+        #     y = y[:, :, np.newaxis]
+        # y *= np.arange(y.shape[2])
 
-        # plot each sample
-        for sample_idx in range(num_samples):
-            # find where in the grid it should be plotted
-            row_idx = sample_idx // nrows
-            col_idx = sample_idx % ncols
+        # # plot each sample
+        # for sample_idx in range(num_samples):
+        #     # find where in the grid it should be plotted
+        #     row_idx = sample_idx // nrows
+        #     col_idx = sample_idx % ncols
 
-            # plot target
-            ax_ref = axes[row_idx * 2 + 0, col_idx]
-            sample_y = y[sample_idx]
-            ax_ref.plot(sample_y)
-            ax_ref.set_xlim(0, len(sample_y))
-            ax_ref.set_ylim(-1, sample_y.shape[1])
-            ax_ref.get_xaxis().set_visible(False)
-            ax_ref.get_yaxis().set_visible(False)
+        #     # plot target
+        #     ax_ref = axes[row_idx * 2 + 0, col_idx]
+        #     sample_y = y[sample_idx]
+        #     ax_ref.plot(sample_y)
+        #     ax_ref.set_xlim(0, len(sample_y))
+        #     ax_ref.set_ylim(-1, sample_y.shape[1])
+        #     ax_ref.get_xaxis().set_visible(False)
+        #     ax_ref.get_yaxis().set_visible(False)
 
-            # plot predictions
-            ax_hyp = axes[row_idx * 2 + 1, col_idx]
-            sample_y_pred = y_pred[sample_idx]
-            ax_hyp.plot(sample_y_pred)
-            ax_hyp.set_ylim(-0.1, 1.1)
-            ax_hyp.set_xlim(0, len(sample_y))
-            ax_hyp.get_xaxis().set_visible(False)
+        #     # plot predictions
+        #     ax_hyp = axes[row_idx * 2 + 1, col_idx]
+        #     sample_y_pred = y_pred[sample_idx]
+        #     ax_hyp.plot(sample_y_pred)
+        #     ax_hyp.set_ylim(-0.1, 1.1)
+        #     ax_hyp.set_xlim(0, len(sample_y))
+        #     ax_hyp.get_xaxis().set_visible(False)
 
-        plt.tight_layout()
+        # plt.tight_layout()
 
-        for logger in self.model.loggers:
-            if isinstance(logger, TensorBoardLogger):
-                logger.experiment.add_figure("samples", fig, self.model.current_epoch)
-            elif isinstance(logger, MLFlowLogger):
-                logger.experiment.log_figure(
-                    run_id=logger.run_id,
-                    figure=fig,
-                    artifact_file=f"samples_epoch{self.model.current_epoch}.png",
-                )
+        # for logger in self.model.loggers:
+        #     if isinstance(logger, TensorBoardLogger):
+        #         logger.experiment.add_figure("samples", fig, self.model.current_epoch)
+        #     elif isinstance(logger, MLFlowLogger):
+        #         logger.experiment.log_figure(
+        #             run_id=logger.run_id,
+        #             figure=fig,
+        #             artifact_file=f"samples_epoch{self.model.current_epoch}.png",
+        #         )
 
-        plt.close(fig)
+        # plt.close(fig)
 
 
 def main(protocol: str, subset: str = "test", model: str = "pyannote/segmentation"):
