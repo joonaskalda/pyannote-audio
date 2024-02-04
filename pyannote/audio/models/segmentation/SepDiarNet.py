@@ -115,7 +115,6 @@ class SepDiarNet(Model):
         n_sources: int = 3,
         use_lstm: bool = False,
         lr: float = 1e-3,
-        gradient_clip_val: float = 5.0,
     ):
         super().__init__(sample_rate=sample_rate, num_channels=num_channels, task=task)
 
@@ -142,16 +141,10 @@ class SepDiarNet(Model):
         self.encoder, self.decoder = make_enc_dec(
             sample_rate=sample_rate, **self.hparams.encoder_decoder
         )
-        self.masker = DPRNN(
-            64 + 1024, out_chan=64, n_src=n_sources, **self.hparams.dprnn
-        )
+        self.masker = DPRNN(n_feats_out, n_src=n_sources, **self.hparams.dprnn)
 
-        from transformers import AutoProcessor, AutoModel
-
-        self.wavlm = AutoModel.from_pretrained("microsoft/wavlm-large")
         # diarization can use a lower resolution than separation, use 128x downsampling
         diarization_scaling = int(128 / encoder_decoder["stride"])
-        self.wavlm_scaling = int(320 / encoder_decoder["stride"])
         self.average_pool = nn.AvgPool1d(
             diarization_scaling, stride=diarization_scaling
         )
@@ -163,6 +156,7 @@ class SepDiarNet(Model):
             lstm_out_features = lstm["hidden_size"] * (
                 2 if lstm["bidirectional"] else 1
             )
+        
         self.linear = nn.ModuleList(
             [
                 nn.Linear(in_features, out_features)
@@ -175,8 +169,6 @@ class SepDiarNet(Model):
                 )
             ]
         )
-        self.gradient_clip_val = gradient_clip_val
-        self.automatic_optimization = False
 
     def build(self):
         if self.use_lstm or self.hparams.linear["num_layers"] > 0:
@@ -201,12 +193,7 @@ class SepDiarNet(Model):
         """
         bsz = waveforms.shape[0]
         tf_rep = self.encoder(waveforms)
-        wavlm_rep = self.wavlm(waveforms.squeeze(1)).last_hidden_state
-        wavlm_rep = wavlm_rep.transpose(1, 2)
-        wavlm_rep = wavlm_rep.repeat_interleave(self.wavlm_scaling, dim=-1)
-        wavlm_rep = pad_x_to_y(wavlm_rep, tf_rep)
-        wavlm_rep = torch.cat((tf_rep, wavlm_rep), dim=1)
-        masks = self.masker(wavlm_rep)
+        masks = self.masker(tf_rep)
         # shape: (batch, nsrc, nfilters, nframes)
         masked_tf_rep = masks * tf_rep.unsqueeze(1)
         decoded_sources = self.decoder(masked_tf_rep)
@@ -225,6 +212,7 @@ class SepDiarNet(Model):
         if not self.use_lstm and self.hparams.linear["num_layers"] == 0:
             outputs = (outputs**2).sum(dim=2).unsqueeze(-1)
         outputs = self.classifier(outputs)
+        
         outputs = outputs.reshape(bsz, self.n_sources, -1)
         outputs = outputs.transpose(1, 2)
 

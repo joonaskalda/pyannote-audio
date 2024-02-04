@@ -1082,9 +1082,7 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         loss : {str: torch.tensor}
             {"loss": loss}
         """
-        wavlm_opt, rest_opt = self.model.optimizers()
-        wavlm_opt.zero_grad()
-        rest_opt.zero_grad()
+
         (
             seg_loss,
             separation_loss,
@@ -1129,20 +1127,6 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
             prog_bar=False,
             logger=True,
         )
-
-        self.model.manual_backward(loss)
-        self.model.clip_gradients(
-            wavlm_opt,
-            gradient_clip_val=self.model.gradient_clip_val,
-            gradient_clip_algorithm="norm",
-        )
-        self.model.clip_gradients(
-            rest_opt,
-            gradient_clip_val=self.model.gradient_clip_val,
-            gradient_clip_algorithm="norm",
-        )
-        wavlm_opt.step()
-        rest_opt.step()
 
         return {"loss": loss}
 
