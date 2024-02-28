@@ -81,6 +81,7 @@ class SegmentationTaskMixin:
         # list of possible values for each metadata key
         metadata_unique_values = defaultdict(list)
 
+        metadata_unique_values["supervised"] = [0, 1]
         metadata_unique_values["subset"] = Subsets
 
         if isinstance(self.protocol, SpeakerDiarizationProtocol):
@@ -117,7 +118,40 @@ class SegmentationTaskMixin:
             # gather metadata and update metadata_unique_values so that each metadatum
             # (e.g. source database or label) is represented by an integer.
             metadatum = dict()
-
+            if file["uri"] in [
+                "M037",
+                "M026",
+                "M028",
+                "M043",
+                "B007",
+                "M018",
+                "M023",
+                "B046",
+                "M033",
+                "B036",
+                "B038",
+                "M016",
+                "M031",
+                "M027",
+                "B024",
+                "B025",
+                "B026",
+                "M022",
+                "M038",
+                "M020",
+                "B047",
+                "B010",
+                "M039",
+                "B021",
+                "M032",
+                "B040",
+                "M040",
+                "B044",
+                "B014",
+            ]:
+                metadatum["supervised"] = 1
+            else:
+                metadatum["supervised"] = 0
             # keep track of source database and subset (train, development, or test)
             if file["database"] not in metadata_unique_values["database"]:
                 metadata_unique_values["database"].append(file["database"])
@@ -282,9 +316,9 @@ class SegmentationTaskMixin:
 
                 else:
                     try:
-                        file_label_idx = (
-                            database_label_idx
-                        ) = global_label_idx = classes.index(label)
+                        file_label_idx = database_label_idx = global_label_idx = (
+                            classes.index(label)
+                        )
                     except ValueError:
                         # skip labels that are not in the list of classes
                         continue
@@ -421,7 +455,9 @@ class SegmentationTaskMixin:
         # indices of training files that matches domain filters
         training = self.metadata["subset"] == Subsets.index("train")
         for key, value in filters.items():
-            training &= self.metadata[key] == self.metadata_unique_values[key].index(value)
+            training &= self.metadata[key] == self.metadata_unique_values[key].index(
+                value
+            )
         file_ids = np.where(training)[0]
 
         # turn annotated duration into a probability distribution

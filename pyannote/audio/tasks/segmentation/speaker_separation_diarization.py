@@ -648,7 +648,12 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
         # turn annotated duration into a probability distribution
         annotated_duration = self.annotated_duration[file_ids]
         prob_annotated_duration = annotated_duration / np.sum(annotated_duration)
-
+        unsupervised_penalty_weight = self.metadata[file_ids]["supervised"] * 0.9 + 0.1
+        prob_weighted = (
+            prob_annotated_duration
+            * unsupervised_penalty_weight
+            / np.sum(prob_annotated_duration * unsupervised_penalty_weight)
+        )
         duration = self.duration
 
         num_chunks_per_file = getattr(self, "num_chunks_per_file", 1)
