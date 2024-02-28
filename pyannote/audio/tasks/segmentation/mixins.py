@@ -80,11 +80,15 @@ class SegmentationTaskMixin:
 
         # list of possible values for each metadata key
         metadata_unique_values = defaultdict(list)
-
+        metadata_unique_values["room"] = list()
         metadata_unique_values["subset"] = Subsets
 
         if isinstance(self.protocol, SpeakerDiarizationProtocol):
             metadata_unique_values["scope"] = Scopes
+
+        # give list of all uppercase letters
+        # uppercase = [chr(i) for i in range(65, 91)]
+        # metadata_unique_values["room"] = uppercase
 
         elif isinstance(self.protocol, SegmentationProtocol):
             classes = getattr(self, "classes", list())
@@ -105,6 +109,7 @@ class SegmentationTaskMixin:
         annotations = list()  # actual annotations
         annotated_classes = list()  # list of annotated classes (per file)
         unique_labels = list()
+        unique_rooms = list()
 
         if self.has_validation:
             files_iter = itertools.chain(
@@ -117,7 +122,11 @@ class SegmentationTaskMixin:
             # gather metadata and update metadata_unique_values so that each metadatum
             # (e.g. source database or label) is represented by an integer.
             metadatum = dict()
-
+            if file["uri"][0] not in unique_rooms:
+                unique_rooms.append(file["uri"][0])
+            metadatum["room"] = unique_rooms.index(file["uri"][0])
+            if metadatum["room"] not in metadata_unique_values["room"]:
+                metadata_unique_values["room"].append(metadatum["room"])
             # keep track of source database and subset (train, development, or test)
             if file["database"] not in metadata_unique_values["database"]:
                 metadata_unique_values["database"].append(file["database"])
@@ -129,7 +138,6 @@ class SegmentationTaskMixin:
             # keep track of speaker label scope (file, database, or global) for speaker diarization protocols
             if isinstance(self.protocol, SpeakerDiarizationProtocol):
                 metadatum["scope"] = Scopes.index(file["scope"])
-
             # keep track of list of classes for regular segmentation protocols
             # Different files may be annotated using a different set of classes
             # (e.g. one database for speech/music/noise, and another one for male/female/child)
