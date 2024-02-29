@@ -1033,7 +1033,19 @@ class JointSpeakerSeparationAndDiarization(SegmentationTaskMixin, Task):
             )
         else:
             permutated_diarization, permutations = permutate(target, diarization)
-
+        is_supervised = torch.empty(weight.shape)
+        is_supervised[0::3, :, :] = (
+            batch["meta"]["supervised"][::2].unsqueeze(-1).unsqueeze(-1)
+        )
+        is_supervised[1::3, :, :] = (
+            batch["meta"]["supervised"][1::2].unsqueeze(-1).unsqueeze(-1)
+        )
+        is_supervised[2::3, :, :] = (
+            (batch["meta"]["supervised"][0::2] * batch["meta"]["supervised"][1::2])
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+        )
+        weight = weight * is_supervised
         seg_loss = self.segmentation_loss(permutated_diarization, target, weight=weight)
 
         separation_loss = self.mixit_loss(
