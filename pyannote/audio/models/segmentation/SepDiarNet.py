@@ -37,7 +37,7 @@ from asteroid.masknn.convolutional import TDConvNet
 from asteroid_filterbanks import make_enc_dec
 from asteroid.utils.torch_utils import pad_x_to_y
 from asteroid.masknn import DPRNN
-
+from .WavLMLoRAWrapper import WavLMWrapper
 
 class SepDiarNet(Model):
     """PyanNet segmentation model
@@ -147,8 +147,21 @@ class SepDiarNet(Model):
         )
 
         from transformers import AutoProcessor, AutoModel
+        from peft import get_peft_config, get_peft_model, LoraConfig, TaskType
 
-        self.wavlm = AutoModel.from_pretrained("microsoft/wavlm-large")
+        # wavlm = AutoModel.from_pretrained("microsoft/wavlm-large")
+        self.wavlm = WavLMWrapper()
+        # peft_config = LoraConfig(
+        #     # task_type=TaskType.FEATURE_EXTRACTION,
+        #     inference_mode=False,
+        #     target_modules=["q_proj", "v_proj", "k_proj", "out_proj"],
+        #     r=32,
+        #     lora_alpha=32,
+        #     lora_dropout=0.05,
+        #     bias="all",
+        # )
+        # self.wavlm = get_peft_model(wavlm, peft_config)
+        # self.wavlm.print_trainable_parameters()
         # diarization can use a lower resolution than separation, use 128x downsampling
         diarization_scaling = int(128 / encoder_decoder["stride"])
         self.wavlm_scaling = int(320 / encoder_decoder["stride"])
@@ -201,7 +214,7 @@ class SepDiarNet(Model):
         """
         bsz = waveforms.shape[0]
         tf_rep = self.encoder(waveforms)
-        wavlm_rep = self.wavlm(waveforms.squeeze(1)).last_hidden_state
+        wavlm_rep = self.wavlm(waveforms.squeeze(1))[-1]
         wavlm_rep = wavlm_rep.transpose(1, 2)
         wavlm_rep = wavlm_rep.repeat_interleave(self.wavlm_scaling, dim=-1)
         wavlm_rep = pad_x_to_y(wavlm_rep, tf_rep)

@@ -23,5 +23,6 @@
 from .PyanNet import PyanNet
 from .SSeRiouSS import SSeRiouSS
 from .SepDiarNet import SepDiarNet
+from .WavLMLoRAWrapper import WavLMWrapper
 
-__all__ = ["PyanNet", "SSeRiouSS", "SepDiarNet"]
+__all__ = ["PyanNet", "SSeRiouSS", "SepDiarNet", "WavLMWrapper"]
