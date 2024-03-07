@@ -62,10 +62,10 @@ class WavLMEncoderLayer(nn.Module):
             or self.config.finetune_method == "combined"
         ):
             self.feed_forward.intermediate_dense = lora.Linear(
-                config.hidden_size, config.intermediate_size, r=config.lora_rank
+                config.hidden_size, config.intermediate_size, r=config.lora_rank, lora_alpha=config.lora_alpha, lora_dropout=config.lora_dropout,
             )
             self.feed_forward.output_dense = lora.Linear(
-                config.intermediate_size, config.hidden_size, r=config.lora_rank
+                config.intermediate_size, config.hidden_size, r=config.lora_rank, lora_alpha=config.lora_alpha, lora_dropout=config.lora_dropout,
             )
 
         if (
@@ -148,7 +148,9 @@ class WavLMWrapper(nn.Module):
         self.model_config.finetune_method = "lora"
         # self.model_config.adapter_hidden_dim = args.adapter_hidden_dim
         # self.model_config.embedding_prompt_dim = args.embedding_prompt_dim
-        self.model_config.lora_rank = 32
+        self.model_config.lora_rank = 16
+        self.model_config.lora_alpha = 16
+        self.model_config.lora_dropout = 0.1
 
         # 3. Config encoder layers with adapter or embedding prompt
         # pdb.set_trace()
