@@ -147,11 +147,6 @@ class PixIT(SegmentationTask):
     share_permutations : bool, optional
         If True, the permutation used by diarization PIT-loss is used to reconstruct
         the original mixtures. Defaults to False.
-    add_noise_sources : bool, optional
-        If True, the two last output sources of the joint model are used as additional
-        noise sources. One noise source is added to each of the reconstructed mixtures.
-        In this case the joint model should output max_speakers_per_chunk + 2 sources. 
-        Defaults to False.
 
     References
     ----------
@@ -183,7 +178,6 @@ class PixIT(SegmentationTask):
         separation_loss_weight: float = 0.5,
         finetune_wavlm: bool = True,
         share_permutations: bool = False,
-        add_noise_sources: bool = False,
     ):
 
         if not ASTEROID_IS_AVAILABLE:
@@ -235,7 +229,6 @@ class PixIT(SegmentationTask):
         self.mixit_loss = MixITLossWrapper(multisrc_neg_sisdr, generalized=True)
         self.finetune_wavlm = finetune_wavlm
         self.share_permutations = share_permutations
-        self.add_noise_sources = add_noise_sources
 
 
     def setup(self, stage=None):
@@ -951,13 +944,7 @@ class PixIT(SegmentationTask):
             torch.ones(batch_size, num_frames, 1, device=self.model.device),
         )
         # (batch_size, num_frames, 1)
-        if self.add_noise_sources and self.share_permutations:
-            # last 2 sources should only contain noise so we force diarization outputs to 0
-            permutated_diarization, permutations = permutate(target, diarization[:, :, :self.max_speakers_per_chunk])
-            target = torch.cat((target, torch.zeros(batch_size, num_frames, 2, device=target.device)), dim=2)
-            permutated_diarization = torch.cat((permutated_diarization, diarization[:, :, self.max_speakers_per_chunk:]), dim=2)
-        else:
-            permutated_diarization, permutations = permutate(target, diarization)
+        permutated_diarization, permutations = permutate(target, diarization)
 
         seg_loss = self.segmentation_loss(permutated_diarization, target, weight=weight)
         if self.share_permutations:
@@ -977,45 +964,23 @@ class PixIT(SegmentationTask):
                 for i in range(bsz // 2)
             ]
             est_mixes = []
-            to_ignore = []
             mix1_speech = []
             mix2_speech = []
             est_mix1_speech = []
             est_mix2_speech = []
             for i in range(bsz // 2):
-                if self.add_noise_sources:
-                    est_mix1 = mom_sources[i, :, speaker_idx_mix1[i]].sum(1) + mom_sources[i,:,3]
-                    est_mix2 = mom_sources[i, :, speaker_idx_mix2[i]].sum(1) + mom_sources[i,:,4]
-                    est_mix3 = mom_sources[i, :, speaker_idx_mix1[i]].sum(1) + mom_sources[i,:,4]
-                    est_mix4 = mom_sources[i, :, speaker_idx_mix2[i]].sum(1) + mom_sources[i,:,3]
-                    sep_loss_first_part = multisrc_neg_sisdr(
-                        torch.stack((est_mix1, est_mix2)).unsqueeze(0), torch.stack((mix1[i], mix2[i])).unsqueeze(0)
-                    )
-                    sep_loss_second_part  = multisrc_neg_sisdr(
-                        torch.stack((est_mix3, est_mix4)).unsqueeze(0), torch.stack((mix1[i], mix2[i])).unsqueeze(0)
-                    )
-                    if sep_loss_first_part < sep_loss_second_part:
-                        est_mixes.append(torch.stack((est_mix1, est_mix2)))
-                    else:
-                        est_mixes.append(torch.stack((est_mix3, est_mix4)))
-                else:
-                    # zero-speaker mixtures should be ignored for separation loss since
-                    # the prediction would be a silent signal and the loss would explode
-                    if num_active_speakers_mix1[i] > 0:
-                        est_mix1 = mom_sources[i, :, speaker_idx_mix1[i]].sum(1)
-                        mix1_speech.append(mix1[i])
-                        est_mix1_speech.append(est_mix1)
-                    if num_active_speakers_mix2[i] > 0:
-                        est_mix2 = mom_sources[i, :, speaker_idx_mix2[i]].sum(1)
-                        mix2_speech.append(mix2[i])
-                        est_mix2_speech.append(est_mix2)
-            if self.add_noise_sources:
-                est_mixes = torch.stack(est_mixes)
-                separation_loss = (multisrc_neg_sisdr(
-                    est_mixes, torch.stack((mix1, mix2)).transpose(0, 1)
-                )).mean()
-            else:
-                separation_loss = (multisrc_neg_sisdr(torch.stack(est_mix1_speech + est_mix2_speech).unsqueeze(1), torch.stack(mix1_speech + mix2_speech).unsqueeze(1))).mean()
+                # zero-speaker mixtures should be ignored for separation loss since
+                # the prediction would be a silent signal and the loss would explode
+                if num_active_speakers_mix1[i] > 0:
+                    est_mix1 = mom_sources[i, :, speaker_idx_mix1[i]].sum(1)
+                    mix1_speech.append(mix1[i])
+                    est_mix1_speech.append(est_mix1)
+                if num_active_speakers_mix2[i] > 0:
+                    est_mix2 = mom_sources[i, :, speaker_idx_mix2[i]].sum(1)
+                    mix2_speech.append(mix2[i])
+                    est_mix2_speech.append(est_mix2)
+
+            separation_loss = (multisrc_neg_sisdr(torch.stack(est_mix1_speech + est_mix2_speech).unsqueeze(1), torch.stack(mix1_speech + mix2_speech).unsqueeze(1))).mean()
         else:
             separation_loss = self.mixit_loss(
                 mom_sources.transpose(1, 2), torch.stack((mix1, mix2)).transpose(0, 1)
