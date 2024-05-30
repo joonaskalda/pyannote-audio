@@ -1013,7 +1013,7 @@ class PixIT(SegmentationTask):
         ) = self.create_mixtures_of_mixtures(mix1, mix2, target[0::2], target[1::2])
         target = torch.cat((target[0::2], target[1::2], mom_target), dim=0)
         diarization, sources = self.model(
-            torch.cat((mix1, mix2, mom), dim=0) + EPS
+            torch.cat((mix1, mix2, mom), dim=0) #+ EPS
         )  # Avoid 0
         if self.oracle_diar:
             diarization = target
@@ -1059,21 +1059,21 @@ class PixIT(SegmentationTask):
                     permutated_diarization,
                     target,
                 )
-            # optimal_loss = (
-            #     torch.sum(
-            #         self.mixit_loss(
-            #             mom_sources.transpose(1, 2),
-            #             torch.stack((mix1, mix2)).transpose(0, 1),
-            #         )[sep_mask]
-            #     )
-            #     / sep_mask.sum()
-            # )
+            optimal_loss = (
+                torch.sum(
+                    self.mixit_loss(
+                        mom_sources.transpose(1, 2),
+                        torch.stack((mix1, mix2)).transpose(0, 1),
+                    )[sep_mask]
+                )
+                / sep_mask.sum()
+            )
             optimal_loss = 0
             middle_point = 0.30
-            # alpha = self.sigmoid(
-            #     seg_loss - middle_point, lam=20
-            # )  # SegLoss typically between 0.2 and 0.5, need a high slope
-            alpha = 0
+            alpha = self.sigmoid(
+                seg_loss - middle_point, lam=20
+            )  # SegLoss typically between 0.2 and 0.5, need a high slope
+            # alpha = 0
             self.model.log(
                 "alpha",
                 alpha,
@@ -1139,8 +1139,8 @@ class PixIT(SegmentationTask):
                 est_mix2_speech.append(est_mix2)
 
         shared_loss = (self.multisrc_neg_sisdr(torch.stack(est_mix1_speech + est_mix2_speech).unsqueeze(1), torch.stack(mix1_speech + mix2_speech).unsqueeze(1))).mean()
-        if (shared_loss != shared_loss).any():
-            pass
+        if torch.abs((shared_loss - separation_loss))>1e-3:
+            breakpoint()
         return (
             seg_loss,
             separation_loss,
