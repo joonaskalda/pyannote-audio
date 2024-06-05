@@ -134,7 +134,7 @@ class ToTaToNet(Model):
         sample_rate: int = 16000,
         num_channels: int = 1,
         task: Optional[Task] = None,
-        n_sources: int = 3,
+        n_sources: int = 6,
         use_wavlm: bool = True,
         gradient_clip_val: float = 5.0,
     ):
