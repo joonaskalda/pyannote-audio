@@ -31,7 +31,7 @@ from typing import Dict, Literal, Optional, Sequence, Text, Union
 import numpy as np
 import torch
 import torch.nn.functional
-from asteroid.losses import MixITLossWrapper#, multisrc_neg_sisdr
+from asteroid.losses import MixITLossWrapper, multisrc_neg_sisdr
 from matplotlib import pyplot as plt
 from pyannote.core import Segment, SlidingWindowFeature
 from pyannote.database.protocol import SpeakerDiarizationProtocol
@@ -85,7 +85,7 @@ class ValDataset(IterableDataset):
         return self.task.val__len__()
 
 
-class MultiSrcNegSDR(_Loss):
+class MultiSrcNegSDRModified(_Loss):
     r"""Changed to not average the loss over mixture pairs
     
     Base class for computing negative SI-SDR, SD-SDR and SNR for a given
@@ -304,8 +304,8 @@ class PixIT(SegmentationTask):
         self.balance = balance
         self.weight = weight
         self.separation_loss_weight = separation_loss_weight
-        self.multisrc_neg_sisdr = MultiSrcNegSDR("sisdr")
-        self.mixit_loss = MixITLossWrapper(self.multisrc_neg_sisdr, generalized=True)
+        self.multisrc_neg_sisdr = MultiSrcNegSDRModified("sisdr")
+        self.mixit_loss = MixITLossWrapper(multisrc_neg_sisdr, generalized=True)
         self.finetune_wavlm = finetune_wavlm
         self.accumulate_gradient = accumulate_gradient
 
@@ -1059,16 +1059,18 @@ class PixIT(SegmentationTask):
                     permutated_diarization,
                     target,
                 )
-            optimal_loss = (
-                torch.sum(
-                    self.mixit_loss(
-                        mom_sources.transpose(1, 2),
-                        torch.stack((mix1, mix2)).transpose(0, 1),
-                    )[sep_mask]
-                )
-                / sep_mask.sum()
-            )
-            optimal_loss = 0
+            # optimal_loss = (
+            #     torch.sum(
+            #         self.mixit_loss(
+            #             mom_sources.transpose(1, 2),
+            #             torch.stack((mix1, mix2)).transpose(0, 1),
+            #         )[sep_mask]
+            #     )
+            #     / sep_mask.sum()
+            # )
+            optimal_loss = self.mixit_loss(
+                mom_sources.transpose(1, 2), torch.stack((mix1, mix2)).transpose(0, 1)
+            ).mean()
             middle_point = 0.30
             alpha = self.sigmoid(
                 seg_loss - middle_point, lam=20
@@ -1139,8 +1141,8 @@ class PixIT(SegmentationTask):
                 est_mix2_speech.append(est_mix2)
 
         shared_loss = (self.multisrc_neg_sisdr(torch.stack(est_mix1_speech + est_mix2_speech).unsqueeze(1), torch.stack(mix1_speech + mix2_speech).unsqueeze(1))).mean()
-        if torch.abs((shared_loss - separation_loss))>1e-3:
-            breakpoint()
+        # if torch.abs((shared_loss - separation_loss))>1e-3:
+        #     breakpoint()
         return (
             seg_loss,
             separation_loss,
