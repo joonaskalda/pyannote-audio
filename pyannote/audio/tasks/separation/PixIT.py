@@ -20,6 +20,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+# AUTHOR: Joonas Kalda (github.com/joonaskalda)
+
 import itertools
 import math
 import random
@@ -175,7 +177,6 @@ class PixIT(SegmentationTask):
         separation_loss_weight: float = 0.5,
         finetune_wavlm: bool = True,
     ):
-
         if not ASTEROID_IS_AVAILABLE:
             raise ImportError(
                 "'asteroid' must be installed to train separation models with PixIT . "

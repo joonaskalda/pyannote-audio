@@ -20,6 +20,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+# AUTHOR: Joonas Kalda (github.com/joonaskalda)
+
 from functools import lru_cache
 from typing import Optional
 
@@ -58,9 +60,9 @@ except ImportError:
 class ToTaToNet(Model):
     """ToTaToNet joint speaker diarization and speech separation model
 
-                        /--------------\
+                        /--------------\\
     Conv1D Encoder --------+--- DPRNN --X------- Conv1D Decoder
-    WavLM -- upsampling --/                 \--- Avg pool -- Linear -- Classifier
+    WavLM -- upsampling --/                 \\--- Avg pool -- Linear -- Classifier
 
 
     Parameters
@@ -74,17 +76,16 @@ class ToTaToNet(Model):
         Defaults to {"stride": 1}.
     linear : dict, optional
         Keyword arugments used to initialize linear layers
-        Defaults to {"hidden_size": 128, "num_layers": 2},
-        i.e. two linear layers with 128 units each.
+        See ToTaToNet.LINEAR_DEFAULTS for default values.
     diar : dict, optional
         Keyword arguments used to initalize the average pooling in the diarization branch.
-        Defaults to {"frames_per_second": 125}.
+        See ToTaToNet.DIAR_DEFAULTS for default values.
     encoder_decoder : dict, optional
         Keyword arguments used to initalize the encoder and decoder.
-        Defaults to {"fb_name": "free", "kernel_size": 32, "n_filters": 64, "stride": 16}.
+        See ToTaToNet.ENCODER_DECODER_DEFAULTS for default values.
     dprnn : dict, optional
         Keyword arguments used to initalize the DPRNN model.
-        Defaults to {"n_repeats": 6, "bn_chan": 128, "hid_size": 128, "chunk_size": 100, "norm_type": "gLN", "mask_act": "relu", "rnn_type": "LSTM"}.
+        See ToTaToNet.DPRNN_DEFAULTS for default values.
     sample_rate : int, optional
         Audio sample rate. Defaults to 16000.
     num_channels : int, optional
@@ -138,7 +139,6 @@ class ToTaToNet(Model):
         use_wavlm: bool = True,
         gradient_clip_val: float = 5.0,
     ):
-
         if not ASTEROID_IS_AVAILABLE:
             raise ImportError(
                 "'asteroid' must be installed to use ToTaToNet separation. "
