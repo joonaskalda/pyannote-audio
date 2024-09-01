@@ -530,6 +530,11 @@ class PixIT(SegmentationTask):
         while True:
             # select one file at random (with probability proportional to its annotated duration)
             file_id = file_ids[cum_prob_annotated_duration.searchsorted(rng.random())]
+            if self.prepared_data["audio-metadata"]["database"][file_id] == 0:
+                # continue with 25% chance
+                if random.randint(0, 3) != 0:
+                    # breakpoint()
+                    continue
             annotations = self.prepared_data["annotations-segments"][
                 np.where(
                     self.prepared_data["annotations-segments"]["file_id"] == file_id
@@ -944,6 +949,11 @@ class PixIT(SegmentationTask):
             torch.ones(batch_size, num_frames, 1, device=self.model.device),
         )
         # (batch_size, num_frames, 1)
+        # is_ami = batch["meta"]["database"] == 0
+        # mask = torch.cat((is_ami[::2], is_ami[::2], torch.ones(bsz//2).to(device=self.model.device)))
+        # # mask = torch.cat((torch.ones(bsz//2).to(device=self.model.device), is_ami[::2], torch.ones(bsz//2).to(device=self.model.device)))
+        # mask = mask.unsqueeze(-1).unsqueeze(-1).expand(-1, num_frames, 1)
+
         permutated_diarization, permutations = permutate(target, diarization)
 
         seg_loss = self.segmentation_loss(permutated_diarization, target, weight=weight)
@@ -979,8 +989,10 @@ class PixIT(SegmentationTask):
                     est_mix2 = mom_sources[i, :, speaker_idx_mix2[i]].sum(1)
                     mix2_speech.append(mix2[i])
                     est_mix2_speech.append(est_mix2)
-
-            separation_loss = (multisrc_neg_sisdr(torch.stack(est_mix1_speech + est_mix2_speech).unsqueeze(1), torch.stack(mix1_speech + mix2_speech).unsqueeze(1))).mean()
+            try:
+                separation_loss = (multisrc_neg_sisdr(torch.stack(est_mix1_speech + est_mix2_speech).unsqueeze(1), torch.stack(mix1_speech + mix2_speech).unsqueeze(1))).mean()
+            except: 
+                separation_loss = torch.tensor(0.0).to(device=self.model.device)
         else:
             separation_loss = self.mixit_loss(
                 mom_sources.transpose(1, 2), torch.stack((mix1, mix2)).transpose(0, 1)

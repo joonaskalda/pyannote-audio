@@ -316,7 +316,7 @@ class AgglomerativeClustering(BaseClustering):
         )
 
         # minimum cluster size
-        self.min_cluster_size = Integer(1, 20)
+        self.min_cluster_size = Integer(1, 50)
 
     def cluster(
         self,

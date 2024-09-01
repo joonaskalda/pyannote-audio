@@ -21,5 +21,6 @@
 # SOFTWARE.
 
 from .ToTaToNet import ToTaToNet
+from .ToTaToNetMossFormer import ToTaToNetMossFormer
 
-__all__ = ["ToTaToNet"]
+__all__ = ["ToTaToNet", "ToTaToNetMossFormer"]

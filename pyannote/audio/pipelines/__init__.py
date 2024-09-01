@@ -26,6 +26,9 @@ from .resegmentation import Resegmentation
 from .speaker_diarization import SpeakerDiarization
 from .speech_separation import SpeechSeparation
 from .voice_activity_detection import VoiceActivityDetection
+from .speech_separation_improved import SpeechSeparationImproved
+from .speaker_diarization_source_embeddings import SpeakerDiarizationSourceEmbeddings
+from .speaker_diarization_optim import SpeakerDiarizationOptim
 
 __all__ = [
     "VoiceActivityDetection",
@@ -34,4 +37,7 @@ __all__ = [
     "Resegmentation",
     "MultiLabelSegmentation",
     "SpeechSeparation",
+    "SpeechSeparationImproved",
+    "SpeakerDiarizationSourceEmbeddings",
+    "SpeakerDiarizationOptim"
 ]

@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2024- CNRS
+# Copyright (c) 2020 CNRS
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -26,7 +26,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from asteroid_filterbanks import make_enc_dec
+from einops import rearrange
 from pyannote.core.utils.generators import pairwise
 
 from pyannote.audio.core.model import Model
@@ -37,31 +37,14 @@ from pyannote.audio.utils.receptive_field import (
     conv1d_receptive_field_center,
     conv1d_receptive_field_size,
 )
+from asteroid_filterbanks import make_enc_dec
+from asteroid.utils.torch_utils import pad_x_to_y
+from asteroid.masknn import DPRNN
+from asteroid.models.one_path_flash_fsmn import SBFLASHBlock_DualA,Dual_Path_Model_MossFormer
+from transformers import AutoProcessor, AutoModel
 
-try:
-    from asteroid.masknn import DPRNN, DPTransformer
-    from asteroid.utils.torch_utils import pad_x_to_y
-
-    ASTEROID_IS_AVAILABLE = True
-except ImportError:
-    ASTEROID_IS_AVAILABLE = False
-
-
-try:
-    from transformers import AutoModel
-
-    TRANSFORMERS_IS_AVAILABLE = True
-except ImportError:
-    TRANSFORMERS_IS_AVAILABLE = False
-
-
-class ToTaToNet(Model):
+class ToTaToNetMossFormer(Model):
     """ToTaToNet joint speaker diarization and speech separation model
-
-                        /--------------\
-    Conv1D Encoder --------+--- DPRNN --X------- Conv1D Decoder
-    WavLM -- upsampling --/                 \--- Avg pool -- Linear -- Classifier
-
 
     Parameters
     ----------
@@ -72,6 +55,12 @@ class ToTaToNet(Model):
     sincnet : dict, optional
         Keyword arugments passed to the SincNet block.
         Defaults to {"stride": 1}.
+    lstm : dict, optional
+        Keyword arguments passed to the LSTM layer.
+        Defaults to {"hidden_size": 128, "num_layers": 2, "bidirectional": True},
+        i.e. two bidirectional layers with 128 units each.
+        Set "monolithic" to False to split monolithic multi-layer LSTM into multiple mono-layer LSTMs.
+        This may proove useful for probing LSTM internals.
     linear : dict, optional
         Keyword arugments used to initialize linear layers
         Defaults to {"hidden_size": 128, "num_layers": 2},
@@ -92,73 +81,74 @@ class ToTaToNet(Model):
     task : Task, optional
         Task to perform. Defaults to None.
     n_sources : int, optional
-        Number of separated sources. Defaults to 3.
+        Number of sources. Defaults to 3.
+    use_lstm : bool, optional
+        Whether to use LSTM in the diarization branch. Defaults to False.
     use_wavlm : bool, optional
         Whether to use the WavLM large model for feature extraction. Defaults to True.
     gradient_clip_val : float, optional
-        Gradient clipping value. Required when fine-tuning the WavLM model and thus using two different optimizers.
+        Gradient clipping value. Required when fine-tuning the WavLM model and thus using two different optimizers. 
         Defaults to 5.0.
-
-    References
-    ----------
-    Joonas Kalda, Clément Pagés, Ricard Marxer, Tanel Alumäe, and Hervé Bredin.
-    "PixIT: Joint Training of Speaker Diarization and Speech Separation
-    from Real-world Multi-speaker Recordings"
-    Odyssey 2024. https://arxiv.org/abs/2403.02288
     """
 
     ENCODER_DECODER_DEFAULTS = {
         "fb_name": "free",
         "kernel_size": 32,
-        "n_filters": 64,
+        "n_filters": 512,
         "stride": 16,
     }
-    LINEAR_DEFAULTS = {"hidden_size": 64, "num_layers": 2}
-    DPRNN_DEFAULTS = {
-        "n_repeats": 6,
-        "bn_chan": 128,
-        "hid_size": 128,
-        "chunk_size": 100,
-        "norm_type": "gLN",
-        "mask_act": "relu",
-        "rnn_type": "LSTM",
+    LSTM_DEFAULTS = {
+        "hidden_size": 64,
+        "num_layers": 2,
+        "bidirectional": True,
+        "monolithic": True,
+        "dropout": 0.0,
+    }
+    LINEAR_DEFAULTS = {"hidden_size": 64, "num_layers": 0}
+    MOSSFORMER2_DEFAULTS = {
+        "intra_numlayers": 8,
+        "bn_chan": 512,
+        "intra_nhead":8,
+        "intra_dffn":1024,
+        "dropout":0,
+        "intra_use_positional": True,
+        "intra_norm_before": True,
+        "num_layers":1,
+        "norm_type": "ln",
+        "chunk_size":250,
+        "masknet_extraskipconnection": True,
+        "masknet_useextralinearlayer": False
     }
     DIAR_DEFAULTS = {"frames_per_second": 125}
 
     def __init__(
         self,
         encoder_decoder: dict = None,
+        lstm: Optional[dict] = None,
         linear: Optional[dict] = None,
         diar: Optional[dict] = None,
-        dprnn: dict = None,
+        convnet: dict = None,
+        mossformer2: dict = None,
         sample_rate: int = 16000,
         num_channels: int = 1,
         task: Optional[Task] = None,
         n_sources: int = 6,
+        use_lstm: bool = False,
         use_wavlm: bool = True,
         gradient_clip_val: float = 5.0,
     ):
-
-        if not ASTEROID_IS_AVAILABLE:
-            raise ImportError(
-                "'asteroid' must be installed to use ToTaToNet separation. "
-                "`pip install pyannote-audio[separation]` should do the trick."
-            )
-
-        if not TRANSFORMERS_IS_AVAILABLE:
-            raise ImportError(
-                "'transformers' must be installed to use ToTaToNet separation. "
-                "`pip install pyannote-audio[separation]` should do the trick."
-            )
-
         super().__init__(sample_rate=sample_rate, num_channels=num_channels, task=task)
 
+        lstm = merge_dict(self.LSTM_DEFAULTS, lstm)
+        lstm["batch_first"] = True
         linear = merge_dict(self.LINEAR_DEFAULTS, linear)
-        dprnn = merge_dict(self.DPRNN_DEFAULTS, dprnn)
+        mossformer2 = merge_dict(self.MOSSFORMER2_DEFAULTS, mossformer2)
         encoder_decoder = merge_dict(self.ENCODER_DECODER_DEFAULTS, encoder_decoder)
         diar = merge_dict(self.DIAR_DEFAULTS, diar)
+        self.n_src = n_sources
+        self.use_lstm = use_lstm
         self.use_wavlm = use_wavlm
-        self.save_hyperparameters("encoder_decoder", "linear", "dprnn", "diar")
+        self.save_hyperparameters("encoder_decoder", "lstm", "linear", "mossformer2", "diar")
         self.n_sources = n_sources
 
         if encoder_decoder["fb_name"] == "free":
@@ -170,6 +160,18 @@ class ToTaToNet(Model):
         self.encoder, self.decoder = make_enc_dec(
             sample_rate=sample_rate, **self.hparams.encoder_decoder
         )
+    
+
+        #---- Setting up the Intra MossFormer block -----#
+        intra_model = SBFLASHBlock_DualA(
+            num_layers=mossformer2['intra_numlayers'],
+            d_model=mossformer2['bn_chan'],
+            nhead=mossformer2['intra_nhead'],
+            d_ffn=mossformer2['intra_dffn'],
+            dropout=mossformer2['dropout'],
+            use_positional_encoding=mossformer2['intra_use_positional'],
+            norm_before=mossformer2['intra_norm_before'],
+        )
 
         if self.use_wavlm:
             self.wavlm = AutoModel.from_pretrained("microsoft/wavlm-large")
@@ -179,22 +181,27 @@ class ToTaToNet(Model):
                     downsampling_factor *= conv_layer.conv.stride[0]
             self.wavlm_scaling = int(downsampling_factor / encoder_decoder["stride"])
 
-            self.masker = DPTransformer(
-                encoder_decoder["n_filters"],
-                # out_chan=encoder_decoder["n_filters"],
-                n_src=n_sources,
-                # **self.hparams.dprnn,
+            self.masker = Dual_Path_Model_MossFormer(
+                in_channels=encoder_decoder["n_filters"] + self.wavlm.feature_projection.projection.out_features,
+                btln_channels=mossformer2['bn_chan'],
+                out_channels=encoder_decoder["n_filters"],
+                intra_model=intra_model,
+                num_layers=mossformer2["num_layers"],
+                norm=mossformer2["norm_type"],
+                K=mossformer2["chunk_size"],
+                num_spks=n_sources,
+                skip_around_intra=mossformer2["masknet_extraskipconnection"],
+                linear_layer_after_inter_intra=mossformer2["masknet_useextralinearlayer"]
             )
         else:
             self.masker = DPRNN(
                 encoder_decoder["n_filters"],
                 out_chan=encoder_decoder["n_filters"],
                 n_src=n_sources,
-                **self.hparams.dprnn,
+                **self.hparams.dprnn
             )
 
         # diarization can use a lower resolution than separation
-        self.wavlm_linear = nn.Linear(self.wavlm.feature_projection.projection.out_features + 64, 64)
         self.diarization_scaling = int(
             sample_rate / diar["frames_per_second"] / encoder_decoder["stride"]
         )
@@ -202,6 +209,13 @@ class ToTaToNet(Model):
             self.diarization_scaling, stride=self.diarization_scaling
         )
         linaer_input_features = n_feats_out
+        if self.use_lstm:
+            del lstm["monolithic"]
+            multi_layer_lstm = dict(lstm)
+            self.lstm = nn.LSTM(n_feats_out, **multi_layer_lstm)
+            linaer_input_features = lstm["hidden_size"] * (
+                2 if lstm["bidirectional"] else 1
+            )
         if linear["num_layers"] > 0:
             self.linear = nn.ModuleList(
                 [
@@ -224,7 +238,7 @@ class ToTaToNet(Model):
         return 1
 
     def build(self):
-        if self.hparams.linear["num_layers"] > 0:
+        if self.use_lstm or self.hparams.linear["num_layers"] > 0:
             self.classifier = nn.Linear(64, self.dimension)
         else:
             self.classifier = nn.Linear(1, self.dimension)
@@ -326,9 +340,6 @@ class ToTaToNet(Model):
             wavlm_rep = wavlm_rep.repeat_interleave(self.wavlm_scaling, dim=-1)
             wavlm_rep = pad_x_to_y(wavlm_rep, tf_rep)
             wavlm_rep = torch.cat((tf_rep, wavlm_rep), dim=1)
-            wavlm_rep = wavlm_rep.transpose(1, 2)
-            wavlm_rep = self.wavlm_linear(wavlm_rep)
-            wavlm_rep = wavlm_rep.transpose(1, 2)
             masks = self.masker(wavlm_rep)
         else:
             masks = self.masker(tf_rep)
@@ -342,10 +353,12 @@ class ToTaToNet(Model):
         outputs = self.average_pool(outputs)
         outputs = outputs.transpose(1, 2)
         # shape (batch, nframes, nfilters)
+        if self.use_lstm:
+            outputs, _ = self.lstm(outputs)
         if self.hparams.linear["num_layers"] > 0:
             for linear in self.linear:
                 outputs = F.leaky_relu(linear(outputs))
-        if self.hparams.linear["num_layers"] == 0:
+        if not self.use_lstm and self.hparams.linear["num_layers"] == 0:
             outputs = (outputs**2).sum(dim=2).unsqueeze(-1)
         outputs = self.classifier(outputs)
         outputs = outputs.reshape(bsz, self.n_sources, -1)
