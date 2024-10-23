@@ -42,8 +42,21 @@ from pyannote.audio.core.task import Problem, Resolution, Specifications, Task
 from pyannote.audio.torchmetrics.classification import EqualErrorRate
 from pyannote.audio.utils.random import create_rng_for_worker
 
+from enum import Enum
+import numpy as np
+
+class SamplingMode(Enum):
+    RANDOM_CLASS_WEIGHTED_FILE_DURATION = 1
+    CLASS_WEIGHTED_FILE_UNIFORM = 2
+    FILE_WEIGHTED_NO_REPLACEMENT = 3
 
 class SupervisedRepresentationLearningTaskMixin(Task):
+    # def __init__(self, sampling_mode=SamplingMode.RANDOM_CLASS_WEIGHTED_FILE_DURATION, **kwargs):
+    #     super().__init__(**kwargs)
+    #     self.sampling_mode = sampling_mode
+    #     # Initialize any additional attributes needed for sampling
+    #     self.reset_epoch_state()
+
     """Methods common to most supervised representation tasks"""
 
     # batch_size = num_classes_per_batch x num_chunks_per_class
@@ -170,9 +183,73 @@ class SupervisedRepresentationLearningTaskMixin(Task):
             EqualErrorRate(compute_on_cpu=True, distances=False),
             BinaryAUROC(compute_on_cpu=True),
         ]
+    def _sample_class_weighted_file_duration(self, rng):
+        classes = list(self.specifications.classes)
+        # Sample a class uniformly
+        chosen_class = rng.choice(classes)
+        
+        # Sample a file weighted by duration
+        chosen_file = rng.choices(
+            self.prepared_data["train"][chosen_class],
+            weights=[f["duration"] for f in self.prepared_data["train"][chosen_class]],
+            k=1,
+        )[0]
+        
+        return chosen_class, chosen_file
+
+    def _sample_class_weighted_file_uniform(self, rng):
+        classes = list(self.specifications.classes)
+        num_files_per_class = [len(self.prepared_data["train"][klass]) for klass in classes]
+        class_weights = num_files_per_class
+        # Normalize weights
+        total = sum(class_weights)
+        class_probs = [w / total for w in class_weights]
+        
+        # Sample a class based on class_probs
+        chosen_class = rng.choices(classes, weights=class_probs, k=1)[0]
+        
+        # Uniformly sample a file from the chosen class
+        chosen_file = rng.choice(self.prepared_data["train"][chosen_class])
+        
+        return chosen_class, chosen_file
+
+    def _initialize_file_pool(self):
+        """Initialize a pool of files for sampling without replacement."""
+        self.file_pool = {}
+        for klass, files in self.prepared_data["train"].items():
+            self.file_pool[klass] = files.copy()
+        
+        # Create a list of all files with weights
+        self.all_files = []
+        self.all_file_weights = []
+        for klass, files in self.prepared_data["train"].items():
+            for file in files:
+                self.all_files.append((klass, file))
+                self.all_file_weights.append(file["duration"])
+        
+    def _sample_file_weighted_no_replacement(self, rng, klass):
+        if klass not in self.file_pool or not self.file_pool[klass]:
+            # No files left to sample from this class
+            return None, None
+
+        # Extract files and their durations for the given class
+        available_files = self.file_pool[klass]
+        available_weights = [file["duration"] for file in available_files]
+
+        if not available_files:
+            # All files from this class have been sampled
+            return None, None
+
+        # Sample a file based on duration weights without replacement
+        chosen_file = rng.choices(available_files, weights=available_weights, k=1)[0]
+
+        # Remove the chosen file from the pool to prevent reselection
+        self.file_pool[klass].remove(chosen_file)
+
+        return klass, chosen_file
 
     def train__iter__(self):
-        """Iterate over training samples
+        """Iterate over training samples for one epoch
 
         Yields
         ------
@@ -182,83 +259,126 @@ class SupervisedRepresentationLearningTaskMixin(Task):
             Speaker index.
         """
 
-        # create worker-specific random number generator
+        # Create worker-specific random number generator
         rng = create_rng_for_worker(self.model)
 
-        classes = list(self.specifications.classes)
-
-        # select batch-wise duration at random
+        # Select batch-wise duration at random
         batch_duration = rng.uniform(self.min_duration, self.duration)
-        num_samples = 0
+
+        # Determine number of batches per epoch
+        num_batches = self.train__len__()
+
+        # Initialize file pool if using FILE_WEIGHTED_NO_REPLACEMENT
+        if self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT:
+            self._initialize_file_pool()
 
         while True:
-            # shuffle classes so that we don't always have the same
-            # groups of classes in a batch (which might be especially
-            # problematic for contrast-based losses like contrastive
-            # or triplet loss.
-            rng.shuffle(classes)
+            # Sample a set of unique classes for the batch
+            if self.sampling_mode == SamplingMode.CLASS_WEIGHTED_FILE_UNIFORM:
+                # Sample classes weighted by the number of files they have
+                classes = list(self.specifications.classes)
+                num_files_per_class = [len(self.prepared_data["train"][klass]) for klass in classes]
+                class_weights = num_files_per_class
+                total = sum(class_weights)
+                class_probs = [w / total for w in class_weights]
+                # Use NumPy to sample without replacement with probabilities
+                sampled_classes = list(np.random.choice(
+                    classes,
+                    size=self.num_classes_per_batch,
+                    replace=False,
+                    p=class_probs
+                ))
+            elif self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT:
+                # Sample classes weighted by the total duration of their available files
+                available_classes = [klass for klass, files in self.file_pool.items() if len(files) > 0]
+                if len(available_classes) < self.num_classes_per_batch:
+                    self._initialize_file_pool()
+                    available_classes = [klass for klass, files in self.file_pool.items() if len(files) > 0]
+                class_weights = [sum(file["duration"] for file in self.file_pool[klass]) for klass in available_classes]
+                total = sum(class_weights)
+                class_probs = [w / total for w in class_weights]
+                sampled_classes = list(np.random.choice(
+                    available_classes,
+                    size=self.num_classes_per_batch,
+                    replace=False,
+                    p=class_probs
+                ))
+            else:
+                # SamplingMode.RANDOM_CLASS_WEIGHTED_FILE_DURATION: sample classes uniformly
+                sampled_classes = rng.sample(self.specifications.classes, self.num_classes_per_batch)
 
-            for klass in classes:
-                # class index in original sorted order
+            # Initialize batch_samples list
+            batch_samples = []
+
+            for klass in sampled_classes:
+                if self.sampling_mode == SamplingMode.CLASS_WEIGHTED_FILE_UNIFORM:
+                    # Sample a file uniformly from the class
+                    chosen_file = rng.choice(self.prepared_data["train"][klass])
+                elif self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT:
+                    # Sample a file weighted by duration without replacement
+                    chosen_class, chosen_file = self._sample_file_weighted_no_replacement(rng, klass)
+                    if chosen_file is None:
+                        continue  # No file to sample from this class
+                else:
+                    # SamplingMode.RANDOM_CLASS_WEIGHTED_FILE_DURATION: sample file weighted by duration
+                    chosen_file = rng.choices(
+                        self.prepared_data["train"][klass],
+                        weights=[f["duration"] for f in self.prepared_data["train"][klass]],
+                        k=1
+                    )[0]
+
+                # Sample a speech turn
+                speech_turn, *_ = rng.choices(
+                    chosen_file["speech_turns"],
+                    weights=[s.duration for s in chosen_file["speech_turns"]],
+                    k=1,
+                )
+
+                # Handle padding or cropping
+                if speech_turn.duration < batch_duration:
+                    X, _ = self.model.audio.crop(chosen_file, speech_turn)
+                    num_missing_frames = (
+                        math.floor(batch_duration * self.model.audio.sample_rate)
+                        - X.shape[1]
+                    )
+                    left_pad = rng.randint(0, num_missing_frames)
+                    X = F.pad(X, (left_pad, num_missing_frames - left_pad))
+                else:
+                    start_time = rng.uniform(
+                        speech_turn.start, speech_turn.end - batch_duration
+                    )
+                    chunk = Segment(start_time, start_time + batch_duration)
+
+                    X, _ = self.model.audio.crop(
+                        chosen_file,
+                        chunk,
+                        duration=batch_duration,
+                    )
+
                 y = self.specifications.classes.index(klass)
 
-                # multiple chunks per class
-                for _ in range(self.num_chunks_per_class):
-                    # select one file at random (with probability proportional to its class duration)
-                    file, *_ = rng.choices(
-                        self.prepared_data["train"][klass],
-                        weights=[
-                            f["duration"] for f in self.prepared_data["train"][klass]
-                        ],
-                        k=1,
-                    )
+                batch_samples.append({"X": X, "y": y})
 
-                    # select one speech turn at random (with probability proportional to its duration)
-                    speech_turn, *_ = rng.choices(
-                        file["speech_turns"],
-                        weights=[s.duration for s in file["speech_turns"]],
-                        k=1,
-                    )
-
-                    # if speech turn is too short, pad with zeros
-                    # TODO: handle this corner case with recently added mode="pad" option to audio.crop
-                    if speech_turn.duration < batch_duration:
-                        X, _ = self.model.audio.crop(file, speech_turn)
-                        num_missing_frames = (
-                            math.floor(batch_duration * self.model.audio.sample_rate)
-                            - X.shape[1]
-                        )
-                        left_pad = rng.randint(0, num_missing_frames)
-                        X = F.pad(X, (left_pad, num_missing_frames - left_pad))
-
-                    # if it is long enough, select chunk at random
-                    else:
-                        start_time = rng.uniform(
-                            speech_turn.start, speech_turn.end - batch_duration
-                        )
-                        chunk = Segment(start_time, start_time + batch_duration)
-
-                        X, _ = self.model.audio.crop(
-                            file,
-                            chunk,
-                            duration=batch_duration,
-                        )
-
-                    yield {"X": X, "y": y}
-
-                    num_samples += 1
-                    if num_samples == self.batch_size:
-                        batch_duration = rng.uniform(self.min_duration, self.duration)
-                        num_samples = 0
+            # Yield all samples in the batch
+            for sample in batch_samples:
+                yield sample
 
     def train__len__(self):
-        duration = sum(
-            datum["duration"]
-            for data in self.prepared_data["train"].values()
-            for datum in data
-        )
-        avg_chunk_duration = 0.5 * (self.min_duration + self.duration)
-        return max(self.batch_size, math.ceil(duration / avg_chunk_duration))
+        if self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT:
+            # Total number of files across all classes
+            total_files = sum(len(files) for files in self.prepared_data["train"].values())
+            # Calculate number of batches per epoch
+            return math.ceil(total_files / self.batch_size/1.2)
+        else:
+            # Original computation for other sampling modes
+            total_duration = sum(
+                datum["duration"]
+                for data in self.prepared_data["train"].values()
+                for datum in data
+            )
+            avg_chunk_duration = 0.5 * (self.min_duration + self.duration)
+            return max(self.batch_size, math.ceil(total_duration / avg_chunk_duration))
+
 
     def collate_fn(self, batch, stage="train"):
         collated = default_collate(batch)
@@ -296,7 +416,7 @@ class SupervisedRepresentationLearningTaskMixin(Task):
         self.model.log(
             "loss/train",
             loss,
-            on_step=False,
+            on_step=True,
             on_epoch=True,
             prog_bar=False,
             logger=True,
@@ -347,6 +467,7 @@ class SupervisedRepresentationLearningTaskMixin(Task):
 
     def val__len__(self):
         if isinstance(self.protocol, SpeakerVerificationProtocol):
+            # breakpoint()
             return len(self.prepared_data["validation"])
 
         elif isinstance(self.protocol, SpeakerDiarizationProtocol):
