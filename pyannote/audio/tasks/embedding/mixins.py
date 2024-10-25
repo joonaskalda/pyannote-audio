@@ -269,7 +269,7 @@ class SupervisedRepresentationLearningTaskMixin(Task):
         num_batches = self.train__len__()
 
         # Initialize file pool if using FILE_WEIGHTED_NO_REPLACEMENT
-        if self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT:
+        if self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT and not hasattr(self, "file_pool"):
             self._initialize_file_pool()
 
         while True:
