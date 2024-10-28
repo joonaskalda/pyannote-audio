@@ -175,6 +175,9 @@ class SupervisedRepresentationLearningTaskMixin(Task):
             min_duration=self.min_duration,
             classes=sorted(self.prepared_data["train"]),
         )
+        self.drop_last = False
+        self.seed = 42
+        self.precompute_batches()
 
     def default_metric(
         self,
@@ -239,134 +242,97 @@ class SupervisedRepresentationLearningTaskMixin(Task):
 
         return klass, chosen_file
 
+    def precompute_batches(self):
+        """Precompute batches to mimic the first DataLoader's behavior."""
+        rng = np.random.RandomState(self.seed)
+
+        # Prepare list of all utterances per speaker
+        self.speaker_to_utterances = {}
+        for speaker in self.specifications.classes:
+            utterances = []
+            for file_info in self.prepared_data["train"][speaker]:
+                for speech_turn in file_info["speech_turns"]:
+                    utterances.append({
+                        "file": file_info,
+                        "segment": speech_turn
+                    })
+            rng.shuffle(utterances)
+            self.speaker_to_utterances[speaker] = utterances
+        # breakpoint()
+        # Compute total number of batches
+        total_utterances = sum(len(utt_list) for utt_list in self.speaker_to_utterances.values())
+        self.total_batches = total_utterances // self.batch_size
+
+        # Precompute batches
+        self.precomputed_batches = []
+        speakers = list(self.speaker_to_utterances.keys())
+        rng.shuffle(speakers)
+
+        # Flatten utterances with speaker labels
+        utterance_queue = []
+        for speaker in speakers:
+            utterances = self.speaker_to_utterances[speaker]
+            for utt in utterances:
+                utterance_queue.append((speaker, utt))
+        rng.shuffle(utterance_queue)
+
+        current_batch = []
+        current_speakers_in_batch = set()
+        for speaker, utt in utterance_queue:
+            if speaker in current_speakers_in_batch:
+                continue  # Skip if speaker already in batch
+            current_batch.append((speaker, utt))
+            current_speakers_in_batch.add(speaker)
+
+            if len(current_batch) == self.batch_size:
+                self.precomputed_batches.append(current_batch)
+                current_batch = []
+                current_speakers_in_batch = set()
+
+        # Handle the last batch
+        if current_batch and not self.drop_last:
+            self.precomputed_batches.append(current_batch)
+
+        self.seed+=1
+        # breakpoint()
+
+
     def train__iter__(self):
-        """Iterate over training samples for one epoch
-
-        Yields
-        ------
-        X: (time, channel)
-            Audio chunks.
-        y: int
-            Speaker index.
-        """
-
-        # Create worker-specific random number generator
-        rng = create_rng_for_worker(self.model)
-
-        # Select batch-wise duration at random
-        batch_duration = rng.uniform(self.min_duration, self.duration)
-
-        # Determine number of batches per epoch
-        num_batches = self.train__len__()
-
-        # Initialize file pool if using FILE_WEIGHTED_NO_REPLACEMENT
-        if self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT and not hasattr(self, "file_pool"):
-            print("Initializing file pool")
-            self._initialize_file_pool()
-
-        while True:
-            # Sample a set of unique classes for the batch
-            if self.sampling_mode == SamplingMode.CLASS_WEIGHTED_FILE_UNIFORM:
-                # Sample classes weighted by the number of files they have
-                classes = list(self.specifications.classes)
-                num_files_per_class = [len(self.prepared_data["train"][klass]) for klass in classes]
-                class_weights = num_files_per_class
-                total = sum(class_weights)
-                class_probs = [w / total for w in class_weights]
-                # Use NumPy to sample without replacement with probabilities
-                sampled_classes = list(np.random.choice(
-                    classes,
-                    size=self.num_classes_per_batch,
-                    replace=False,
-                    p=class_probs
-                ))
-            elif self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT:
-                # Sample classes weighted by the total duration of their available files
-                available_classes = [klass for klass, files in self.file_pool.items() if len(files) > 0]
-                if len(available_classes) < self.num_classes_per_batch:
-                    self._initialize_file_pool()
-                    available_classes = [klass for klass, files in self.file_pool.items() if len(files) > 0]
-                num_files_per_class = [len(self.file_pool[klass]) for klass in available_classes]
-                class_weights = num_files_per_class
-                total = sum(class_weights)
-                class_probs = [w / total for w in class_weights]
-                sampled_classes = list(np.random.choice(
-                    available_classes,
-                    size=self.num_classes_per_batch,
-                    replace=False,
-                    p=class_probs
-                ))
-            else:
-                # SamplingMode.RANDOM_CLASS_WEIGHTED_FILE_DURATION: sample classes uniformly
-                sampled_classes = rng.sample(self.specifications.classes, self.num_classes_per_batch)
-
-            # Initialize batch_samples list
+        """Iterate over precomputed training batches."""
+        if self.seed>42:
+            # breakpoint()
+            print("Seed is greater than 42")
+            self.precompute_batches()
+        # Determine worker-specific batch indices
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            # Single-process data loading
+            iter_batches = self.precomputed_batches
+        else:
+            # Multi-process data loading
+            num_workers = worker_info.num_workers
+            worker_id = worker_info.id
+            # Split batches among workers
+            iter_batches = self.precomputed_batches[worker_id::num_workers]
+        # breakpoint()
+        for batch in iter_batches:
             batch_samples = []
-
-            for klass in sampled_classes:
-                if self.sampling_mode == SamplingMode.CLASS_WEIGHTED_FILE_UNIFORM:
-                    # Sample a file uniformly from the class
-                    chosen_file = rng.choice(self.prepared_data["train"][klass])
-                elif self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT:
-                    # Sample a file weighted by duration without replacement
-                    chosen_class, chosen_file = self._sample_file_weighted_no_replacement(rng, klass)
-                    if chosen_file is None:
-                        raise ValueError(f"No files left to sample from class {klass}")
-                else:
-                    # SamplingMode.RANDOM_CLASS_WEIGHTED_FILE_DURATION: sample file weighted by duration
-                    chosen_file = rng.choices(
-                        self.prepared_data["train"][klass],
-                        weights=[f["duration"] for f in self.prepared_data["train"][klass]],
-                        k=1
-                    )[0]
-
-                # Sample a speech turn
-                speech_turn, *_ = rng.choices(
-                    chosen_file["speech_turns"],
-                    weights=[s.duration for s in chosen_file["speech_turns"]],
-                    k=1,
-                )
-
-                # Handle padding or cropping
-                if speech_turn.duration < batch_duration:
-                    X, _ = self.model.audio.crop(chosen_file, speech_turn)
-                    num_missing_frames = (
-                        math.floor(batch_duration * self.model.audio.sample_rate)
-                        - X.shape[1]
-                    )
-                    left_pad = rng.randint(0, num_missing_frames)
-                    X = F.pad(X, (left_pad, num_missing_frames - left_pad))
-                else:
-                    start_time = rng.uniform(
-                        speech_turn.start, speech_turn.end - batch_duration
-                    )
-                    chunk = Segment(start_time, start_time + batch_duration)
-
-                    X, _ = self.model.audio.crop(
-                        chosen_file,
-                        chunk,
-                        duration=batch_duration,
-                    )
-
-                y = self.specifications.classes.index(klass)
-
+            for speaker, utt_info in batch:
+                file = utt_info["file"]
+                segment = utt_info["segment"]
+                # Load and process the audio segment
+                X, _ = self.model.audio.crop(file, segment, duration=self.duration)
+                y = self.specifications.classes.index(speaker)
                 batch_samples.append({"X": X, "y": y})
 
-            # Yield all samples in the batch
+            # Yield the batch
+            # collated_batch = self.collate_fn(batch_samples, stage="train")
+            # yield collated_batch
             for sample in batch_samples:
                 yield sample
 
-    def train__len__(self):
-        if self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT:
-            # Total number of files across all classes
-            total_files = sum(len(files) for files in self.prepared_data["train"].values())
-            # Calculate number of batches per epoch
-            return math.ceil(total_files /1.2)
-        else:
-            # Original computation for other sampling modes
-            total_duration = sum( datum["duration"] for data in self.prepared_data["train"].values() for datum in data )
-            avg_chunk_duration = 0.5 * (self.min_duration + self.duration)
-            return max(self.batch_size, math.ceil(total_duration / avg_chunk_duration))
+    def train__len__(self):        
+        return len(self.precomputed_batches) * self.batch_size
 
 
     def collate_fn(self, batch, stage="train"):
