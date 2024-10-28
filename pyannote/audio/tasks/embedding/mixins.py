@@ -219,14 +219,6 @@ class SupervisedRepresentationLearningTaskMixin(Task):
         for klass, files in self.prepared_data["train"].items():
             self.file_pool[klass] = files.copy()
         
-        # Create a list of all files with weights
-        self.all_files = []
-        self.all_file_weights = []
-        for klass, files in self.prepared_data["train"].items():
-            for file in files:
-                self.all_files.append((klass, file))
-                self.all_file_weights.append(file["duration"])
-        
     def _sample_file_weighted_no_replacement(self, rng, klass):
         if klass not in self.file_pool or not self.file_pool[klass]:
             # No files left to sample from this class
@@ -234,14 +226,13 @@ class SupervisedRepresentationLearningTaskMixin(Task):
 
         # Extract files and their durations for the given class
         available_files = self.file_pool[klass]
-        available_weights = [file["duration"] for file in available_files]
 
         if not available_files:
             # All files from this class have been sampled
             return None, None
 
         # Sample a file based on duration weights without replacement
-        chosen_file = rng.choices(available_files, weights=available_weights, k=1)[0]
+        chosen_file = rng.choices(available_files, k=1)[0]
 
         # Remove the chosen file from the pool to prevent reselection
         self.file_pool[klass].remove(chosen_file)
@@ -270,6 +261,7 @@ class SupervisedRepresentationLearningTaskMixin(Task):
 
         # Initialize file pool if using FILE_WEIGHTED_NO_REPLACEMENT
         if self.sampling_mode == SamplingMode.FILE_WEIGHTED_NO_REPLACEMENT and not hasattr(self, "file_pool"):
+            print("Initializing file pool")
             self._initialize_file_pool()
 
         while True:
@@ -294,7 +286,8 @@ class SupervisedRepresentationLearningTaskMixin(Task):
                 if len(available_classes) < self.num_classes_per_batch:
                     self._initialize_file_pool()
                     available_classes = [klass for klass, files in self.file_pool.items() if len(files) > 0]
-                class_weights = [sum(file["duration"] for file in self.file_pool[klass]) for klass in available_classes]
+                num_files_per_class = [len(self.file_pool[klass]) for klass in available_classes]
+                class_weights = num_files_per_class
                 total = sum(class_weights)
                 class_probs = [w / total for w in class_weights]
                 sampled_classes = list(np.random.choice(
@@ -318,7 +311,7 @@ class SupervisedRepresentationLearningTaskMixin(Task):
                     # Sample a file weighted by duration without replacement
                     chosen_class, chosen_file = self._sample_file_weighted_no_replacement(rng, klass)
                     if chosen_file is None:
-                        continue  # No file to sample from this class
+                        raise ValueError(f"No files left to sample from class {klass}")
                 else:
                     # SamplingMode.RANDOM_CLASS_WEIGHTED_FILE_DURATION: sample file weighted by duration
                     chosen_file = rng.choices(
@@ -368,14 +361,10 @@ class SupervisedRepresentationLearningTaskMixin(Task):
             # Total number of files across all classes
             total_files = sum(len(files) for files in self.prepared_data["train"].values())
             # Calculate number of batches per epoch
-            return math.ceil(total_files / self.batch_size/1.2)
+            return math.ceil(total_files /1.2)
         else:
             # Original computation for other sampling modes
-            total_duration = sum(
-                datum["duration"]
-                for data in self.prepared_data["train"].values()
-                for datum in data
-            )
+            total_duration = sum( datum["duration"] for data in self.prepared_data["train"].values() for datum in data )
             avg_chunk_duration = 0.5 * (self.min_duration + self.duration)
             return max(self.batch_size, math.ceil(total_duration / avg_chunk_duration))
 
