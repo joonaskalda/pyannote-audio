@@ -209,6 +209,7 @@ class SupervisedRepresentationLearningWithArcFace(
             embedding_size,
             margin=self.margin,
             scale=self.scale,
+            weight_init_func=nn.init.xavier_normal_
         )
         # self.model.loss_func = AAMSoftmax(
         #     embedding_size,
