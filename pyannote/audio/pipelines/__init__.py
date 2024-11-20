@@ -26,7 +26,6 @@ from .resegmentation import Resegmentation
 from .speaker_diarization import SpeakerDiarization
 from .speech_separation import SpeechSeparation
 from .voice_activity_detection import VoiceActivityDetection
-from .speaker_diarization_optim import SpeakerDiarizationOptim
 from .pipeline_asr import SpeechSeparationASR
 
 __all__ = [
@@ -36,6 +35,5 @@ __all__ = [
     "Resegmentation",
     "MultiLabelSegmentation",
     "SpeechSeparation",
-    "SpeakerDiarizationOptim",
     "SpeechSeparationASR",
 ]
