@@ -292,7 +292,14 @@ class SupervisedRepresentationLearningWithArcFace(
         Validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
         Defaults to AUROC (area under the ROC curve).
     cache : string, optional
-
+    sampling_mode : str, optional
+        Sampling mode. Defaults to "classes_weighted_file_uniform".
+        Options are "classes_weighted_file_uniform", "espnet", and "original".
+        "classes_weighted_file_uniform" has classes weighted by the total file count.
+        "original" has classes weighted by the total duration.
+        "espnet" uses exactly (?) the same sampling method as in EspNet-SPK.
+    drop_last : bool, optional
+        Drop last batch if True. Defaults to False.
     """
 
     #  TODO: add a ".metric" property that tells how speaker embedding trained with this approach
@@ -314,6 +321,7 @@ class SupervisedRepresentationLearningWithArcFace(
         augmentation: Optional[BaseWaveformTransform] = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
         sampling_mode: str = "classes_weighted_file_uniform",
+        drop_last: bool = False,
     ):
 
         self.num_chunks_per_class = num_chunks_per_class
@@ -322,11 +330,10 @@ class SupervisedRepresentationLearningWithArcFace(
         self.margin = margin
         self.scale = scale
 
-        self.drop_last = False
-        self.seed = 42
+        self.drop_last = drop_last
         
         self.sampling_mode = sampling_mode
-
+        
         super().__init__(
             protocol,
             duration=duration,

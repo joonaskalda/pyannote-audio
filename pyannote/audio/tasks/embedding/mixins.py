@@ -164,6 +164,7 @@ class SupervisedRepresentationLearningTaskMixin(Task):
             classes=sorted(self.prepared_data["train"]),
         )
         
+        # need to precompute batches here for train__len__ to work
         if self.sampling_mode == "espnet":
             self.precompute_batches()
 
@@ -176,8 +177,10 @@ class SupervisedRepresentationLearningTaskMixin(Task):
         ]
         
     def precompute_batches(self):
-        """Precompute batches to mimic the first DataLoader's behavior."""
-        rng = np.random.RandomState(self.seed)
+        """Precompute batches so that sampling without replacement can be done with multiple workers."""
+
+        # random seed should be different for each epoch
+        rng = np.random.RandomState(self.trainer.current_epoch)
 
         # Prepare list of all utterances per speaker
         self.speaker_to_utterances = {}
@@ -226,41 +229,6 @@ class SupervisedRepresentationLearningTaskMixin(Task):
         if current_batch and not self.drop_last:
             self.precomputed_batches.append(current_batch)
 
-        self.seed+=1
-
-    def _sample_original(self, rng):
-        """Original sampling method from Version 1."""
-        classes = list(self.specifications.classes)
-        rng.shuffle(classes)
-        for klass in classes:
-            y = self.specifications.classes.index(klass)
-            for _ in range(self.num_chunks_per_class):
-                file = rng.choices(
-                    self.prepared_data["train"][klass],
-                    weights=[f["duration"] for f in self.prepared_data["train"][klass]],
-                    k=1,
-                )[0]
-                speech_turn = rng.choices(
-                    file["speech_turns"],
-                    weights=[s.duration for s in file["speech_turns"]],
-                    k=1,
-                )[0]
-
-                if speech_turn.duration < self.min_duration:
-                    X, _ = self.model.audio.crop(file, speech_turn)
-                    num_missing_frames = (
-                        math.floor(self.min_duration * self.model.audio.sample_rate)
-                        - X.shape[1]
-                    )
-                    left_pad = rng.randint(0, num_missing_frames)
-                    X = F.pad(X, (left_pad, num_missing_frames - left_pad))
-                else:
-                    start_time = rng.uniform(
-                        speech_turn.start, speech_turn.end - self.min_duration
-                    )
-                    chunk = Segment(start_time, start_time + self.min_duration)
-                    X, _ = self.model.audio.crop(file, chunk, duration=self.min_duration)
-                yield {"X": X, "y": y}
 
     def train__iter__(self):
         """Iterate over precomputed training batches."""
@@ -343,8 +311,7 @@ class SupervisedRepresentationLearningTaskMixin(Task):
             num_samples = 0
 
             while True:
-            # Sample a set of unique classes for the batch
-                
+                # Sample a set of unique classes for the batch
                 classes = list(self.specifications.classes)
                 num_files_per_class = [len(self.prepared_data["train"][klass]) for klass in classes]
                 class_weights = num_files_per_class
@@ -399,11 +366,10 @@ class SupervisedRepresentationLearningTaskMixin(Task):
                         num_samples = 0  # Use 'yield from' instead of 'return''
 
         elif self.sampling_mode == "espnet":
-            if self.seed > 42:
-                print("Seed is greater than 42")
+            
+            if self.trainer.current_epoch > 0:
                 self.precompute_batches()
             
-            # Existing code for other sampling modes...
             worker_info = torch.utils.data.get_worker_info()
             if worker_info is None:
                 iter_batches = self.precomputed_batches
@@ -539,10 +505,10 @@ class SupervisedRepresentationLearningTaskMixin(Task):
             y_true = batch["y"]
             self.model.validation_metric(y_pred, y_true)
 
-            self.model.log_dict(
-                self.model.validation_metric,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-            )
+            # self.model.log_dict(
+            #     self.model.validation_metric,
+            #     on_step=False,
+            #     on_epoch=True,
+            #     prog_bar=True,
+            #     logger=True,
+            # )
