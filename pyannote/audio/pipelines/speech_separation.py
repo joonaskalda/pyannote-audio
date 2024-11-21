@@ -166,19 +166,17 @@ class SpeechSeparation(SpeakerDiarizationMixin, Pipeline):
 
         else:
             self.segmentation = ParamDict(
-                threshold=Uniform(0.1, 0.9),
+                threshold=Uniform(0.45, 0.60),
                 min_duration_off=Uniform(0.0, 1.0),
             )
 
-        if self.klustering == "OracleClustering":
-            metric = "not_applicable"
 
-        else:
-            self._embedding = PretrainedSpeakerEmbedding(
-                self.embedding, use_auth_token=use_auth_token
-            )
-            self._audio = Audio(sample_rate=self._embedding.sample_rate, mono="downmix")
-            metric = self._embedding.metric
+        # else:
+        self._embedding = PretrainedSpeakerEmbedding(
+            self.embedding, use_auth_token=use_auth_token
+        )
+        self._audio = Audio(sample_rate=self._embedding.sample_rate, mono="downmix")
+        metric = self._embedding.metric
 
         try:
             Klustering = Clustering[clustering]
@@ -190,7 +188,7 @@ class SpeechSeparation(SpeakerDiarizationMixin, Pipeline):
 
         self.separation = ParamDict(
             leakage_removal=Categorical([True, False]),
-            asr_collar=Uniform(0.0, 1.0),
+            asr_collar=Uniform(0.0, 0.5),
         )
 
     @property
