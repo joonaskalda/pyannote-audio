@@ -227,7 +227,6 @@ class SupervisedRepresentationLearningTaskMixin(Task):
             self.precomputed_batches.append(current_batch)
 
         self.seed+=1
-        # breakpoint()
 
     def _sample_original(self, rng):
         """Original sampling method from Version 1."""
