@@ -29,7 +29,6 @@ from .wespeaker import (
     WeSpeakerResNet293,
 )
 from .xvector import XVectorMFCC, XVectorSincNet
-from .ecapa_tdnn_only import MelSpectrogram_ECAPA_TDNN
 
 __all__ = [
     "XVectorSincNet",
@@ -40,5 +39,4 @@ __all__ = [
     "WeSpeakerResNet293",
     "WavLMEmbeddings",
     "WavLM_ECAPA_TDNN",
-    "MelSpectrogram_ECAPA_TDNN",
 ]
