@@ -180,6 +180,7 @@ class SupervisedRepresentationLearningWithArcFace(
         pin_memory: bool = False,
         augmentation: Optional[BaseWaveformTransform] = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
+        sampling_mode: str = "classes_weighted_file_uniform",
     ):
 
         self.num_chunks_per_class = num_chunks_per_class
@@ -187,6 +188,11 @@ class SupervisedRepresentationLearningWithArcFace(
 
         self.margin = margin
         self.scale = scale
+
+        self.drop_last = False
+        self.seed = 42
+        
+        self.sampling_mode = sampling_mode
 
         super().__init__(
             protocol,

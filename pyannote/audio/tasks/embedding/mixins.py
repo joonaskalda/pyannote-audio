@@ -46,14 +46,7 @@ from enum import Enum
 import numpy as np
 
 class SupervisedRepresentationLearningTaskMixin(Task):
-    # def __init__(self, sampling_mode=SamplingMode.RANDOM_CLASS_WEIGHTED_FILE_DURATION, **kwargs):
-    #     super().__init__(**kwargs)
-    #     self.sampling_mode = sampling_mode
-    #     # Initialize any additional attributes needed for sampling
-    #     self.reset_epoch_state()
-
     """Methods common to most supervised representation tasks"""
-
     # batch_size = num_classes_per_batch x num_chunks_per_class
 
     @property
@@ -170,10 +163,7 @@ class SupervisedRepresentationLearningTaskMixin(Task):
             min_duration=self.min_duration,
             classes=sorted(self.prepared_data["train"]),
         )
-        self.drop_last = False
-        self.seed = 42
         
-        self.sampling_mode = "classes_weighted_file_uniform"
         if self.sampling_mode == "espnet":
             self.precompute_batches()
 
