@@ -13,7 +13,7 @@ import torch
 from einops import rearrange
 from pyannote.core import Annotation, SlidingWindow, SlidingWindowFeature
 from pyannote.metrics.diarization import GreedyDiarizationErrorRate
-from pyannote.metrics.asr import CpWER
+from pyannote.metrics.meeteval_cpwer import CpWER
 
 from pyannote.pipeline.parameter import Categorical, ParamDict, Uniform
 
@@ -55,6 +55,8 @@ class SpeechSeparationASR(SpeechSeparation):
         Version of the WhisperX ASR model to use.
     asr_options : dict, optional
         Additional options for the WhisperX ASR model.
+    references_dir : str, optional
+        Directory containing reference text files.
     """
 
     def __init__(
@@ -70,6 +72,7 @@ class SpeechSeparationASR(SpeechSeparation):
         use_auth_token: Union[Text, None] = None,
         asr_model_version: str = "small.en",  # Default WhisperX model
         asr_options: Optional[dict] = None,
+        references_dir: str = "/gpfs/mariana/home/jokald/data/ami_public_manual/words_joined",
     ):
         super().__init__(
             segmentation=segmentation,
@@ -89,7 +92,7 @@ class SpeechSeparationASR(SpeechSeparation):
             "max_new_tokens": None,
             "clip_timestamps": None,
             "hallucination_silence_threshold": None,
-            "hotwords": None,
+            # "hotwords": None,
         }
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         compute_type = "float16" if torch.cuda.is_available() else "int8"
@@ -101,6 +104,7 @@ class SpeechSeparationASR(SpeechSeparation):
             asr_options=self.asr_options,
         )
         self.normalizer = EnglishTextNormalizer()
+        self.references_dir = references_dir
 
     @property
     def CACHED_SEGMENTATION(self):
@@ -175,7 +179,7 @@ class SpeechSeparationASR(SpeechSeparation):
         -------
         diarization : Annotation
             Speaker diarization
-        asr_predictions : Dict[str, str]
+        asr_predictions : list[str]
             ASR transcriptions for each speaker.
         embeddings : np.array, optional
             Representative speaker embeddings such that `embeddings[i]` is the
@@ -216,41 +220,16 @@ class SpeechSeparationASR(SpeechSeparation):
                 diarization, sources = result
                 embeddings = None
 
-        # Initialize ASR predictions dictionary
-        # asr_predictions: Dict[str, str] = {}
+
 
         # If no speakers detected, return empty ASR predictions
         if not diarization:
             return diarization, asr_predictions, embeddings
-
         asr_predictions = [self.apply_asr(source) for source in sources.data.T]
         asr_predictions = [self.normalizer(prediction) for prediction in asr_predictions]
-        # # Iterate over each speaker and perform ASR
-        # for speaker in diarization.labels():
-        #     # Get segments for the current speaker
-        #     speaker_segments = diarization.get_timeline(label=speaker)
 
-        #     # Initialize an empty list to hold audio chunks for the speaker
-        #     speaker_audio = np.array([], dtype=np.float32)
-
-        #     # Concatenate all segments for the speaker
-        #     for segment in speaker_segments:
-        #         # Extract audio for the segment
-        #         waveform, sr = self._audio.crop(file, segment)
-        #         if sr != self.whisperx_model.sample_rate:
-        #             # Resample if necessary
-        #             waveform = self._audio.resample(waveform, sr, self.whisperx_model.sample_rate)
-        #         speaker_audio = np.concatenate((speaker_audio, waveform.flatten()))
-
-        #     # Apply ASR to the concatenated audio
-        #     transcription = self.apply_asr(
-        #         speaker_audio, sample_rate=self.whisperx_model.sample_rate
-        #     )
-        #     transcription = self.apply_asr(source)
-        #     # Store the transcription
-        #     asr_predictions[speaker] = transcription
 
         return diarization, asr_predictions, sources
     
     def get_metric(self) -> CpWER:
-        return CpWER(**self.der_variant)
+        return CpWER(references_dir=self.references_dir, **self.der_variant)
