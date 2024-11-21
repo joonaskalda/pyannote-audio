@@ -505,10 +505,10 @@ class SupervisedRepresentationLearningTaskMixin(Task):
             y_true = batch["y"]
             self.model.validation_metric(y_pred, y_true)
 
-            # self.model.log_dict(
-            #     self.model.validation_metric,
-            #     on_step=False,
-            #     on_epoch=True,
-            #     prog_bar=True,
-            #     logger=True,
-            # )
+            self.model.log_dict(
+                self.model.validation_metric,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
