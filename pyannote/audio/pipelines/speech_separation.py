@@ -134,6 +134,7 @@ class SpeechSeparation(SpeakerDiarizationMixin, Pipeline):
         segmentation_batch_size: int = 1,
         der_variant: Optional[dict] = None,
         use_auth_token: Union[Text, None] = None,
+        embedding_input: str = "sources",
     ):
         super().__init__()
 
@@ -145,6 +146,7 @@ class SpeechSeparation(SpeakerDiarizationMixin, Pipeline):
         self.embedding = embedding
         self.embedding_batch_size = embedding_batch_size
         self.embedding_exclude_overlap = embedding_exclude_overlap
+        self.embedding_input = embedding_input
 
         self.klustering = clustering
 
@@ -395,6 +397,152 @@ class SpeechSeparation(SpeakerDiarizationMixin, Pipeline):
 
         return embeddings
 
+    def get_embeddings_using_sources(
+        self,
+        file,
+        binary_segmentations: SlidingWindowFeature,
+        separations,
+        exclude_overlap: bool = False,
+        hook: Optional[Callable] = None,
+    ):
+        """Extract embeddings for each (chunk, speaker) pair
+
+        Parameters
+        ----------
+        file : AudioFile
+        binary_segmentations : (num_chunks, num_frames, num_speakers) SlidingWindowFeature
+            Binarized segmentation.
+        exclude_overlap : bool, optional
+            Exclude overlapping speech regions when extracting embeddings.
+            In case non-overlapping speech is too short, use the whole speech.
+        hook: Optional[Callable]
+            Called during embeddings after every batch to report the progress
+
+        Returns
+        -------
+        embeddings : (num_chunks, num_speakers, dimension) array
+        """
+
+        # when optimizing the hyper-parameters of this pipeline with frozen
+        # "segmentation.threshold", one can reuse the embeddings from the first trial,
+        # bringing a massive speed up to the optimization process (and hence allowing to use
+        # a larger search space).
+        if self.training:
+            # we only re-use embeddings if they were extracted based on the same value of the
+            # "segmentation.threshold" hyperparameter or if the segmentation model relies on
+            # `powerset` mode
+            cache = file.get("training_cache/embeddings", dict())
+            if ("embeddings" in cache) and (
+                self._segmentation.model.specifications[0].powerset
+                or (cache["segmentation.threshold"] == self.segmentation.threshold)
+            ):
+                return cache["embeddings"]
+
+        duration = binary_segmentations.sliding_window.duration
+        num_chunks, num_frames, num_speakers = binary_segmentations.data.shape
+
+        if exclude_overlap:
+            # minimum number of samples needed to extract an embedding
+            # (a lower number of samples would result in an error)
+            min_num_samples = self._embedding.min_num_samples
+
+            # corresponding minimum number of frames
+            num_samples = duration * self._embedding.sample_rate
+            min_num_frames = math.ceil(num_frames * min_num_samples / num_samples)
+
+            # zero-out frames with overlapping speech
+            clean_frames = 1.0 * (
+                np.sum(binary_segmentations.data, axis=2, keepdims=True) < 2
+            )
+            clean_segmentations = SlidingWindowFeature(
+                binary_segmentations.data * clean_frames,
+                binary_segmentations.sliding_window,
+            )
+
+        else:
+            min_num_frames = -1
+            clean_segmentations = SlidingWindowFeature(
+                binary_segmentations.data, binary_segmentations.sliding_window
+            )
+
+        def iter_waveform_and_mask():
+            for (chunk, masks), (_, clean_masks), (_, local_separated_sources) in zip(
+                binary_segmentations, clean_segmentations, separations
+            ):
+                # chunk: Segment(t, t + duration)
+                # masks: (num_frames, local_num_speakers) np.ndarray
+
+                # mask may contain NaN (in case of partial stitching)
+                masks = np.nan_to_num(masks, nan=0.0).astype(np.float32)
+                clean_masks = np.nan_to_num(clean_masks, nan=0.0).astype(np.float32)
+
+                for mask, clean_mask, local_separated_source in zip(
+                    masks.T, clean_masks.T, local_separated_sources.T
+                ):
+                    # mask: (num_frames, ) np.ndarray
+
+                    if np.sum(clean_mask) > min_num_frames:
+                        used_mask = clean_mask
+                    else:
+                        used_mask = mask
+
+                    yield torch.from_numpy(
+                        local_separated_source[None][None]
+                    ), torch.from_numpy(used_mask)[None]
+                    # w: (1, 1, num_samples) torch.Tensor
+                    # m: (1, num_frames) torch.Tensor
+
+        batches = batchify(
+            iter_waveform_and_mask(),
+            batch_size=self.embedding_batch_size,
+            fillvalue=(None, None),
+        )
+
+        batch_count = math.ceil(num_chunks * num_speakers / self.embedding_batch_size)
+
+        embedding_batches = []
+
+        if hook is not None:
+            hook("embeddings", None, total=batch_count, completed=0)
+
+        for i, batch in enumerate(batches, 1):
+            waveforms, masks = zip(*filter(lambda b: b[0] is not None, batch))
+
+            waveform_batch = torch.vstack(waveforms)
+            # (batch_size, 1, num_samples) torch.Tensor
+
+            mask_batch = torch.vstack(masks)
+            # (batch_size, num_frames) torch.Tensor
+
+            embedding_batch: np.ndarray = self._embedding(
+                waveform_batch, masks=mask_batch
+            )
+            # (batch_size, dimension) np.ndarray
+
+            embedding_batches.append(embedding_batch)
+
+            if hook is not None:
+                hook("embeddings", embedding_batch, total=batch_count, completed=i)
+
+        embedding_batches = np.vstack(embedding_batches)
+
+        embeddings = rearrange(embedding_batches, "(c s) d -> c s d", c=num_chunks)
+
+        # caching embeddings for subsequent trials
+        # (see comments at the top of this method for more details)
+        if self.training:
+            if self._segmentation.model.specifications[0].powerset:
+                file["training_cache/embeddings"] = {
+                    "embeddings": embeddings,
+                }
+            else:
+                file["training_cache/embeddings"] = {
+                    "segmentation.threshold": self.segmentation.threshold,
+                    "embeddings": embeddings,
+                }
+
+        return embeddings
+
     def reconstruct(
         self,
         segmentations: SlidingWindowFeature,
@@ -534,7 +682,7 @@ class SpeechSeparation(SpeakerDiarizationMixin, Pipeline):
 
         if self.klustering == "OracleClustering" and not return_embeddings:
             embeddings = None
-        else:
+        elif self.embedding_input == "original_audio":
             embeddings = self.get_embeddings(
                 file,
                 binarized_segmentations,
@@ -543,6 +691,18 @@ class SpeechSeparation(SpeakerDiarizationMixin, Pipeline):
             )
             hook("embeddings", embeddings)
             #   shape: (num_chunks, local_num_speakers, dimension)
+        elif self.embedding_input == "sources":
+            embeddings = self.get_embeddings_using_sources(
+                file,
+                binarized_segmentations,
+                separations,
+                exclude_overlap=self.embedding_exclude_overlap,
+                hook=hook,
+            )
+            hook("embeddings", embeddings)
+            #   shape: (num_chunks, local_num_speakers, dimension)
+        else:
+            raise ValueError(f"Invalid embedding input: {self.embedding_input}")
 
         hard_clusters, _, centroids = self.clustering(
             embeddings=embeddings,
