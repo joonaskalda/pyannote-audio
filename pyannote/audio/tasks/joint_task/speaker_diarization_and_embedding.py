@@ -42,6 +42,7 @@ from pyannote.database.protocol.protocol import Scope, Subset
 from pytorch_metric_learning.losses import ArcFaceLoss
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 from torchmetrics import Metric
+import torch.nn as nn
 
 from scipy.spatial.distance import cdist
 
@@ -955,6 +956,7 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             self.model.hparams["embedding_dim"],
             margin=self.margin,
             scale=self.scale,
+            weight_init_func=nn.init.xavier_normal_
         )
 
     def segmentation_loss(
