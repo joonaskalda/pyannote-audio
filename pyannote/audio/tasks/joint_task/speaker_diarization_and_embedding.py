@@ -1031,7 +1031,7 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         self.model.log(
             "loss/train/dia",
             dia_loss,
-            on_step=False,
+            on_step=True,
             on_epoch=True,
             prog_bar=True,
             logger=True,
@@ -1090,7 +1090,7 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         self.model.log(
             "loss/train/arcface",
             emb_loss,
-            on_step=False,
+            on_step=True,
             on_epoch=True,
             prog_bar=True,
             logger=True,
