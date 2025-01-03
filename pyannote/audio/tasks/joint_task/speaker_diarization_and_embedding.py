@@ -686,7 +686,8 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
 
         # sample chunk start time in order to intersect it with the sampled segment
         start_time = np.random.uniform(
-            max(segment["start"] - duration, 0), segment["end"]
+            segment["start"],
+            segment["end"] - duration,
         )
 
         return (segment["file_id"], start_time)
@@ -737,7 +738,7 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         # should be shuffled since otherwise each data loader will have the same order of classes initially
         emb_task_classes = self.specifications[Subtasks.index("embedding")].classes[:]
         rng.shuffle(emb_task_classes)
-        
+
         sample_idx = 0
         embedding_class_idx = 0
         while True:
@@ -1360,7 +1361,6 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         batch_idx: int
             Batch index.
         """
-
         # get reference
         reference = batch["annotation"]
         num_speakers = len(reference.labels())
