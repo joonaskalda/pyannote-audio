@@ -960,6 +960,9 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         return collated_batch
 
     def setup_loss_func(self):
+        # check if model has pre-trained arcface weights
+        if hasattr(self.model, "arc_face_loss"):
+            return
         self.model.arc_face_loss = ArcFaceLoss(
             len(self.specifications[Subtasks.index("embedding")].classes),
             self.model.hparams["embedding_dim"],
