@@ -464,13 +464,19 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         global_scope_mask = (
             self.prepared_data["annotations-segments"]["global_label_idx"] > -1
         )
+        train_file_mask = self.prepared_data["audio-metadata"][
+            "subset"
+        ] == Subsets.index("train")
+        train_file_ids = np.where(train_file_mask)[0]
+        train_segment_mask = np.isin(
+            self.prepared_data["annotations-segments"]["file_id"], train_file_ids
+        )
+        mask = train_segment_mask & global_scope_mask
         self.embedding_files_id = np.unique(
-            self.prepared_data["annotations-segments"]["file_id"][global_scope_mask]
+            self.prepared_data["annotations-segments"]["file_id"][mask]
         )
         embedding_classes = np.unique(
-            self.prepared_data["annotations-segments"]["global_label_idx"][
-                global_scope_mask
-            ]
+            self.prepared_data["annotations-segments"]["global_label_idx"][mask]
         )
 
         # if there is no file dedicated to the embedding task
