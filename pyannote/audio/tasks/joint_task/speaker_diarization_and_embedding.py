@@ -578,9 +578,9 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             pass
 
         # initial frame-level targets
-        num_frames = self.model.num_frames(
+        num_frames = int(self.model.num_frames(
             round(duration * self.model.hparams.sample_rate)
-        )
+        ))
         y = np.zeros((num_frames, num_labels), dtype=np.uint8)
 
         # map labels to indices
