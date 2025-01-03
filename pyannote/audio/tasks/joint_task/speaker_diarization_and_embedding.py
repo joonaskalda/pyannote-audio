@@ -1160,6 +1160,23 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         else:
             loss = self.alpha * dia_loss
 
+        # using multiple optimizers requires manual optimization
+        if not self.model.automatic_optimization:
+            optimizers = self.model.optimizers()
+            optimizers = optimizers if isinstance(optimizers, list) else [optimizers]
+            for optimizer in optimizers:
+                optimizer.zero_grad()
+
+            self.model.manual_backward(loss)
+
+            for optimizer in optimizers:
+                self.model.clip_gradients(
+                    optimizer,
+                    gradient_clip_val=self.model.gradient_clip_val,
+                    gradient_clip_algorithm="norm",
+                )
+                optimizer.step()
+                
         return {"loss": loss}
 
     def reconstruct(
