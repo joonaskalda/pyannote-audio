@@ -734,8 +734,10 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         batch_size = self.batch_size
 
         # use original order for the first run on the shuffled classes list:
+        # should be shuffled since otherwise each data loader will have the same order of classes initially
         emb_task_classes = self.specifications[Subtasks.index("embedding")].classes[:]
-
+        rng.shuffle(emb_task_classes)
+        
         sample_idx = 0
         embedding_class_idx = 0
         while True:
