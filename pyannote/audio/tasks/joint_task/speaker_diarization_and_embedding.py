@@ -1051,6 +1051,11 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         emb_loss : torch.Tensor
             arcface loss for the current batch
         """
+        if embeddings[1] == 1:
+            # no pooling between diarization and embedding branches 
+            diarization_pooling = False
+        else:
+            diarization_pooling = True
 
         # Get speaker representations from the embedding subtask
         embeddings = rearrange(emb_prediction, "b s e -> (b s) e")
@@ -1059,9 +1064,21 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         # compute loss only on global scope speaker embedding
         valid_embs = rearrange(valid_embs, "b s -> (b s)")
         # compute the loss
-        emb_loss = self.model.arc_face_loss(
-            embeddings[valid_embs, :], targets[valid_embs]
-        )
+        if diarization_pooling:
+            emb_loss = self.model.arc_face_loss(
+                embeddings[valid_embs, :], targets[valid_embs]
+            )
+        else:
+            # TODO: there is definitely a better way to do this
+            max_pool = nn.MaxPool1d(kernel_size=3, stride=3)
+            converted_targets = max_pool(targets.unsqueeze(0).float()).squeeze(0).long()
+            converted_valid_embs = (
+                max_pool(valid_embs.unsqueeze(0).float()).squeeze(0).bool()
+            )
+            emb_loss = self.model.arc_face_loss(
+                embeddings[converted_valid_embs, :],
+                converted_targets[converted_valid_embs],
+            )
 
         # skip batch if something went wrong for some reason
         if torch.isnan(emb_loss):
