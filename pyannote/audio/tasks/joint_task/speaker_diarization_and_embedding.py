@@ -1054,9 +1054,6 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             embeddings[valid_embs, :], targets[valid_embs]
         )
 
-        if torch.any(valid_embs):
-            emb_loss = (1.0 / torch.sum(valid_embs)) * emb_loss
-
         # skip batch if something went wrong for some reason
         if torch.isnan(emb_loss):
             return None
