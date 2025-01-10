@@ -24,11 +24,9 @@ from pyannote.audio.tasks.embedding.mixins import (
 
 
 def create_rng_for_worker(model) -> np.random.Generator:
-    """Create worker-specific random number generator
+    """Create worker-specific random number generator.
 
-    This makes sure that
-    1. training samples generation is reproducible
-    2. every (worker, epoch) uses a different seed
+    Ensures reproducible training samples generation and unique seeds per worker and epoch.
 
     Parameters
     ----------
@@ -41,14 +39,10 @@ def create_rng_for_worker(model) -> np.random.Generator:
         A NumPy random number generator with a unique seed.
     """
 
-    # create random number generator
     global_seed = os.environ.get("PL_GLOBAL_SEED", "unset")
     worker_info = torch.utils.data.get_worker_info()
 
-    if worker_info is None:
-        worker_id = None
-    else:
-        worker_id = worker_info.id
+    worker_id = worker_info.id if worker_info else None
 
     seed_tuple = (
         global_seed,
@@ -63,10 +57,8 @@ def create_rng_for_worker(model) -> np.random.Generator:
     return np.random.default_rng(seed)
 
 
-class GSE(
-    SupervisedRepresentationLearningTaskMixin,
-):
-    """Implemnentation of https://arxiv.org/pdf/2410.12182
+class GSE(SupervisedRepresentationLearningTaskMixin, Task):
+    """Implementation of Guided Speaker Embeddings (GSE) https://arxiv.org/pdf/2410.12182
 
     Parameters
     ----------
@@ -80,53 +72,40 @@ class GSE(
         When `cache` exists, `Task.prepare_data()` is skipped and (meta)-data
         are loaded from disk. Defaults to a temporary path.
     duration : float, optional
-        Chunks duration in seconds. Defaults to two seconds (2.).
+        Chunks duration in seconds. Defaults to ten seconds (10.0).
     min_duration : float, optional
         Sample training chunks duration uniformely between `min_duration`
         and `duration`. Defaults to `duration` (i.e. fixed length chunks).
     num_classes_per_batch : int, optional
         Number of classes per batch. Defaults to 32.
-    num_chunks_per_class : int, optional
-        Number of chunks per class. Defaults to 1.
     margin : float, optional
-        Margin. Defaults to 28.6.
+        Margin for loss function. Defaults to 28.6.
     scale : float, optional
-        Scale. Defaults to 64.
-    num_workers : int, optional
-        Number of workers used for generating training samples.
-        Defaults to multiprocessing.cpu_count() // 2.
+        Scale for loss function. Defaults to 64.0.
+    num_workers : Optional[int], optional
+        Number of data loader workers. Defaults to half the CPU count.
     pin_memory : bool, optional
-        If True, data loaders will copy tensors into CUDA pinned
-        memory before returning them. See pytorch documentation
-        for more details. Defaults to False.
-    augmentation : BaseWaveformTransform, optional
-        torch_audiomentations waveform transform, used by dataloader
-        during training.
-    metric : optional
-        Validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
-        Defaults to AUROC (area under the ROC curve).
-    cache : string, optional
+        If True, data loaders will copy tensors into CUDA pinned memory.
+    metric : Union[Metric, Sequence[Metric], Dict[str, Metric]], optional
+        Validation metric(s). Defaults to AUROC.
+    drop_last : bool, optional
+        Drop the last incomplete batch. Defaults to False.
+    gradient : dict, optional
+        Gradient clipping parameters. Defaults to {"clip_val": 5.0, "clip_algorithm": "norm", "accumulate_batches": 1}.
     sampling_mode : str, optional
         Sampling mode. Defaults to "classes_weighted_file_uniform".
-        Options are "classes_weighted_file_uniform", "espnet", and "original".
-        "classes_weighted_file_uniform" has classes weighted by the total file count.
-        "original" has classes weighted by the total duration.
-        "espnet" uses exactly (?) the same sampling method as in EspNet-SPK.
-    drop_last : bool, optional
-        Drop last batch if True. Defaults to False.
-
-    gradient: dict, optional
-        Keywords arguments for gradient calculation.
-        Defaults to {"clip_val": 5.0, "clip_algorithm": "norm", "accumulate_batches": 1}
+    noise_augmentation : Optional[BaseWaveformTransform], optional
+        Noise augmentation transform.
+    rir_augmentation : Optional[BaseWaveformTransform], optional
+        Room Impulse Response augmentation transform.
     """
 
-    # Class-level constants for magic numbers
-    NUM_MIXTURE_SIZE: int = 3
+    NUM_SPEAKERS_IN_MIXTURE: int = 3
     DEFAULT_SAMPLE_RATE: int = 16000
     MIN_DELAY: float = 0.0
     MAX_DELAY: float = 3.0
-    SAMPLE_DURATION_MIN: float = 3.0
-    SAMPLE_DURATION_MAX: float = 6.0
+    UTT_DURATION_MIN: float = 3.0
+    UTT_DURATION_MAX: float = 6.0
     GAIN_DB_RANGE: tuple = (-5, 5)
     ACTIVATION_THRESHOLD: float = 1e-6
     MIN_ACTIVE_DURATION_RATIO: float = 0.05
@@ -136,17 +115,14 @@ class GSE(
         protocol: Protocol,
         cache: Optional[str] = None,
         min_duration: Optional[float] = None,
-        duration: float = 2.0,
-        num_classes_per_batch: int = 32,
+        duration: float = 10.0,
         num_chunks_per_class: int = 1,
+        num_classes_per_batch: int = 96,
         margin: float = 28.6,
         scale: float = 64.0,
         num_workers: Optional[int] = None,
         pin_memory: bool = False,
-        augmentation: Optional[BaseWaveformTransform] = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
-        sampling_mode: str = "original",
-        drop_last: bool = False,
         gradient: dict = {
             "clip_val": 5.0,
             "clip_algorithm": "norm",
@@ -155,17 +131,15 @@ class GSE(
         noise_augmentation: Optional[BaseWaveformTransform] = None,
         rir_augmentation: Optional[BaseWaveformTransform] = None,
     ):
-        if num_classes_per_batch % self.NUM_MIXTURE_SIZE != 0:
+        if num_classes_per_batch % self.NUM_SPEAKERS_IN_MIXTURE != 0:
             raise ValueError(
-                f"num_classes_per_batch must be divisible by {self.NUM_MIXTURE_SIZE}"
+                f"num_classes_per_batch must be divisible by {self.NUM_SPEAKERS_IN_MIXTURE}"
             )
 
-        self.num_chunks_per_class = num_chunks_per_class
         self.num_classes_per_batch = num_classes_per_batch
+        self.num_chunks_per_class = num_chunks_per_class
         self.margin = margin
         self.scale = scale
-        self.drop_last = drop_last
-        self.sampling_mode = sampling_mode
         self.gradient = gradient
         self.noise_augmentation = noise_augmentation
         self.rir_augmentation = rir_augmentation
@@ -174,10 +148,10 @@ class GSE(
             protocol,
             duration=duration,
             min_duration=min_duration,
-            batch_size=self.batch_size,
+            batch_size=self.num_chunks_per_class * self.num_classes_per_batch,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            augmentation=augmentation,
+            augmentation=None,
             metric=metric,
             cache=cache,
         )
@@ -202,7 +176,6 @@ class GSE(
         classes = list(self.specifications.classes)
 
         num_utterances = 0
-        num_classes = 0
         X_utterances: List[torch.Tensor] = []
         y_utterances: List[int] = []
         delays: List[float] = []
@@ -212,7 +185,7 @@ class GSE(
             sampled_classes = self.sample_classes(rng, classes)
             for klass in sampled_classes:
                 utterance_duration = rng.uniform(
-                    self.SAMPLE_DURATION_MIN, self.SAMPLE_DURATION_MAX
+                    self.UTT_DURATION_MIN, self.UTT_DURATION_MAX
                 )
                 delay = self.calculate_delay(rng, utterance_durations, delays)
                 utterance_durations.append(utterance_duration)
@@ -227,16 +200,15 @@ class GSE(
                 X_utterances.append(X)
                 y_utterances.append(y)
                 num_utterances += 1
-                num_classes += 1
 
-                if len(X_utterances) == self.NUM_MIXTURE_SIZE:
+                if len(X_utterances) == self.NUM_SPEAKERS_IN_MIXTURE:
                     # We now have enough utterances to create a mixture
                     mixture = self.create_mixtures(X_utterances, delays, rng=rng)
                     activation_features = self.compute_activation_features(
                         X_utterances, delays
                     )
                     activation_features = activation_features.to(self.model.device)
-                    for i in range(self.NUM_MIXTURE_SIZE):
+                    for i in range(self.NUM_SPEAKERS_IN_MIXTURE):
                         yield {
                             "X": mixture,
                             "y": y_utterances[i],
@@ -248,11 +220,8 @@ class GSE(
                     delays = []
                     utterance_durations = []
 
-                if num_classes == self.batch_size:
-                    num_classes = 0
-
     def sample_classes(self, rng: np.random.Generator, classes: List[str]) -> List[str]:
-        """Sample a set of unique classes for the batch based on class probabilities."""
+        """Sample a set of unique classes for the batch weighted by number of files per class."""
         num_files_per_class = [
             len(self.prepared_data["train"][klass]) for klass in classes
         ]
@@ -277,9 +246,9 @@ class GSE(
     ) -> float:
         """Calculate the delay for the current utterance."""
         if not utterance_durations:
-            # First utterance can be midway by the start of the mixture
-            delay = rng.uniform(-self.MAX_DELAY, self.MAX_DELAY)
-            return max(delay, self.MIN_DELAY)
+            # First utterance can be midway by the start of the mixture with 50% chance or delayed by up to 3 seconds
+            delay = rng.uniform(-3.0, 3.0)
+            return max(delay, 0.0)
         else:
             previous_delay = delays[-1]
             previous_duration = utterance_durations[-1]
@@ -292,12 +261,10 @@ class GSE(
         """Select a speech turn from the file, weighted by duration."""
         if not file["speech_turns"]:
             raise ValueError("No speech turns available in the selected file.")
-        # Compute normalized weights (probabilities)
         durations = [s.duration for s in file["speech_turns"]]
         total_duration = sum(durations)
         probabilities = [d / total_duration for d in durations]
 
-        # Sample one speech turn using probabilities
         speech_turn = rng.choice(
             file["speech_turns"],
             p=probabilities,
@@ -335,18 +302,18 @@ class GSE(
 
     def create_mixtures(
         self,
-        X_utterances: List[torch.Tensor],
+        utterances: List[torch.Tensor],
         delays: List[float],
         rng: np.random.Generator,
         target_len: float = 10.0,
-        fs: int = 16000,
+        sample_rate: int = 16000,
     ) -> torch.Tensor:
         """Create a mixture of audio utterances with random delays and gains."""
-        target_len_samples = int(target_len * fs)
+        target_len_samples = int(target_len * sample_rate)
         mixture = torch.zeros(1, target_len_samples)
 
-        for utt, delay in zip(X_utterances, delays):
-            start = int(delay * fs)
+        for utt, delay in zip(utterances, delays):
+            start = int(delay * sample_rate)
             end = start + utt.shape[1]
 
             if end > target_len_samples:
@@ -370,21 +337,24 @@ class GSE(
         return 10 ** (db / 20)
 
     def compute_activation_features(
-        self, X_utterances, delays, target_len=10.0, num_frames=499, fs=16000
-    ):
+        self,
+        utterances: List[torch.Tensor],
+        delays: List[float],
+        target_len: float = 10.0,
+        num_frames: int = 499,
+        sample_rate: int = 16000,
+    ) -> torch.Tensor:
         """
         Compute activation features for each speaker (n_speakers, 2, n_frames)
         First channel: speaker i active frames
         Second channel: any speaker other than i active at frame
         num_frames: lenght of input to ECAPA-TDNN (after signal passed through WavLM)
         """
-        target_len_samples = int(target_len * fs)
-        # Create binary activity signals for each speaker
-        # Shape for each: (1, 1, total_len)
+        target_len_samples = int(target_len * sample_rate)
         binary_signals = []
-        for utt, delay in zip(X_utterances, delays):
+        for utt, delay in zip(utterances, delays):
             binary = (utt.abs() > self.ACTIVATION_THRESHOLD).float()
-            start = int(delay * fs)
+            start = int(delay * sample_rate)
             pad_front = torch.zeros(1, start)
             pad_end_size = target_len_samples - start - binary.shape[1]
             pad_end = torch.zeros(1, max(pad_end_size, 0))
@@ -393,20 +363,18 @@ class GSE(
             ]
             binary_signals.append(padded.unsqueeze(0))
 
-        binary_tensor = torch.cat(
-            binary_signals, dim=0
-        )  # Shape: (num_speakers, 1, total_len)
+        binary_tensor = torch.cat(binary_signals, dim=0)  # (num_speakers, 1, total_len)
 
         interp_signals = F.interpolate(
             binary_tensor, size=num_frames, mode="nearest"
-        )  # Shape: (num_speakers, 1, num_frames)
+        )  # (num_speakers, 1, num_frames)
 
-        activation_features = torch.zeros(len(X_utterances), 2, num_frames)
+        activation_features = torch.zeros(len(utterances), 2, num_frames)
 
         activation_features[:, 0, :] = interp_signals.squeeze(1)
 
-        for i in range(len(X_utterances)):
-            others = binary_tensor[torch.arange(len(X_utterances)) != i]
+        for i in range(len(utterances)):
+            others = binary_tensor[torch.arange(len(utterances)) != i]
             if others.numel() == 0:
                 activation_features[i, 1, :] = 0.0
                 continue
@@ -425,25 +393,25 @@ class GSE(
         X, y = batch["X"], batch["y"]
         y_active = batch["y_active"]
 
-        batch_mask = (y_active.sum(-1) > 0)[:, 0]
-        X = X[batch_mask]
-        y = y[batch_mask]
-        y_active = y_active[batch_mask]
+        mask = (y_active.sum(-1) > 0)[:, 0]
+        X = X[mask]
+        y = y[mask]
+        y_active = y_active[mask]
 
         if not self.model.automatic_optimization:
             optimizers = self.model.optimizers()
             optimizers = optimizers if isinstance(optimizers, list) else [optimizers]
 
-            num_accumulate_batches = self.gradient.get("accumulate_batches", 1)
-            if batch_idx % num_accumulate_batches == 0:
+            accumulate = self.gradient.get("accumulate_batches", 1)
+            if batch_idx % accumulate == 0:
                 for optimizer in optimizers:
                     optimizer.zero_grad()
 
             loss = self.model.arc_face_loss(self.model(X, y_active), y)
-            scaled_loss = loss / num_accumulate_batches
+            scaled_loss = loss / accumulate
             self.model.manual_backward(scaled_loss)
 
-            if (batch_idx + 1) % num_accumulate_batches == 0:
+            if (batch_idx + 1) % accumulate == 0:
                 for optimizer in optimizers:
                     self.model.clip_gradients(
                         optimizer,
