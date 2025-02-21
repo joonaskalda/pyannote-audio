@@ -19,15 +19,23 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+from pyannote.audio.torchmetrics.classification import EqualErrorRate
+from torchmetrics.classification import BinaryAUROC
+from functools import cached_property, partial
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 
+
+from copy import deepcopy
 from collections import defaultdict
 import itertools
 from pathlib import Path
 import random
 import warnings
 from tempfile import mkstemp
-from typing import Dict, Literal, Optional, Sequence, Tuple, Union
-
+from typing import Dict, Literal, Optional, Sequence, Tuple, Union, List
+import math
+import os
+import zlib
 import numpy as np
 import torch
 from einops import rearrange
@@ -41,35 +49,94 @@ from pyannote.core import (
 from pyannote.database.protocol.protocol import Scope, Subset
 from pytorch_metric_learning.losses import ArcFaceLoss
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
+from torch_audiomentations import AddBackgroundNoise, ApplyImpulseResponse
 from torchmetrics import Metric
 import torch.nn as nn
-
+import torch.nn.functional as F
+import torchaudio
 from scipy.spatial.distance import cdist
+
+# import math
+from torch.utils.data.dataloader import default_collate
+import pytorch_metric_learning.losses
+
 
 from pyannote.audio import Inference
 from pyannote.audio.core.io import Audio
-from pyannote.audio.core.task import Problem, Resolution, Specifications, get_dtype
+from pyannote.audio.core.task import (
+    Problem,
+    Resolution,
+    Specifications,
+    get_dtype,
+    Task,
+)
 from pyannote.audio.tasks import SpeakerDiarization
 from pyannote.audio.utils.loss import nll_loss
 from pyannote.audio.utils.permutation import permutate
 from pyannote.audio.utils.random import create_rng_for_worker
-from pyannote.audio.pipelines.clustering import KMeansClustering, OracleClustering
+from pyannote.audio.pipelines.clustering import (
+    KMeansClustering,
+    OracleClustering,
+    AgglomerativeClustering,
+)
 from pyannote.audio.pipelines.utils import SpeakerDiarizationMixin
 
 from pyannote.audio.torchmetrics import (
     DiarizationErrorRate,
     FalseAlarmRate,
     MissedDetectionRate,
+    OptimalDiarizationErrorRate,
+    OptimalDiarizationErrorRateThreshold,
+    OptimalFalseAlarmRate,
+    OptimalMissedDetectionRate,
+    OptimalSpeakerConfusionRate,
     SpeakerConfusionRate,
 )
 
 from torchmetrics import MetricCollection
+
+# from pyannote.audio.utils.random import create_rng_for_worker
+
 
 Subtask = Literal["diarization", "embedding"]
 
 Subsets = list(Subset.__args__)
 Scopes = list(Scope.__args__)
 Subtasks = list(Subtask.__args__)
+
+
+def create_rng_for_worker(model) -> np.random.Generator:
+    """Create worker-specific random number generator.
+
+    Ensures reproducible training samples generation and unique seeds per worker and epoch.
+
+    Parameters
+    ----------
+    model : YourModelType
+        The model instance containing training state.
+
+    Returns
+    -------
+    np.random.Generator
+        A NumPy random number generator with a unique seed.
+    """
+
+    global_seed = os.environ.get("PL_GLOBAL_SEED", "unset")
+    worker_info = torch.utils.data.get_worker_info()
+
+    worker_id = worker_info.id if worker_info else None
+
+    seed_tuple = (
+        global_seed,
+        worker_id,
+        model.local_rank,
+        model.global_rank,
+        model.current_epoch,
+    )
+    # use adler32 because python's `hash` is not deterministic.
+    seed = zlib.adler32(str(seed_tuple).encode())
+
+    return np.random.default_rng(seed)
 
 
 class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
@@ -96,7 +163,7 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
     def __init__(
         self,
         protocol,
-        duration: float = 5.0,
+        duration: float = 10.0,
         max_speakers_per_chunk: int = 3,
         max_speakers_per_frame: int = 2,
         weigh_by_cardinality: bool = False,
@@ -104,11 +171,28 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         dia_task_rate: float = 0.5,
         num_workers: int = None,
         pin_memory: bool = False,
-        margin: float = 28.6,
-        scale: float = 64.0,
+        margin: float = 11.4,
+        small_margin: float = 5.7,
+        scale: float = 30.0,
         alpha: float = 0.5,
         augmentation: BaseWaveformTransform = None,
         cache: Optional[Union[str, None]] = None,
+        automatic_optimization: bool = True,
+        diar_pooling: bool = False,
+        keep_shorter_segments: bool = True,
+        noise_augmentation: Optional[BaseWaveformTransform] = None,
+        rir_augmentation: Optional[BaseWaveformTransform] = None,
+        mean_var_norm: bool = False,
+        gradient: dict = {
+            "clip_val": 5.0,
+            "clip_algorithm": "norm",
+            "accumulate_batches": 1,
+        },
+        ami_aam_weight: float = 1.0,
+        sample_utterances_from_same_file: bool = True,
+        vc_dia_weight: float = 1.0,
+        lambda_param: float = 0.8,
+        normalize_utterances: bool = False,
     ) -> None:
         """TODO Add docstring"""
         super().__init__(
@@ -126,12 +210,14 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
 
         self.num_dia_samples = int(batch_size * dia_task_rate)
         self.margin = margin
+        self.small_margin = small_margin
         self.scale = scale
         self.alpha = alpha
         # keep track of the use of database available in the meta protocol
         # * embedding databases are those with global speaker label scope
         # * diarization databases are those with file or database speaker label scope
         self.embedding_files_id = []
+        self.global_files_id = []
 
         self.validation_metrics = MetricCollection(
             {
@@ -143,6 +229,82 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         )
 
         self.oracle_validation_metrics = self.validation_metrics.clone(prefix="Oracle")
+        self.embedding_validation_metrics = MetricCollection(
+            {
+                "EqualErrorRate": EqualErrorRate(compute_on_cpu=True, distances=False),
+                "BinaryAUROC": BinaryAUROC(compute_on_cpu=True),
+            }
+        )
+        self.diar_pooling = diar_pooling
+        self.keep_shorter_segments = keep_shorter_segments
+        self.noise_augmentation = noise_augmentation
+        self.rir_augmentation = rir_augmentation
+        self.mean_var_norm = mean_var_norm
+        self.gradient = gradient
+        self.dia_task_rate = dia_task_rate
+        self.ami_aam_weight = ami_aam_weight
+        self.vc_dia_weight = vc_dia_weight
+        self.sample_utterances_from_same_file = sample_utterances_from_same_file
+        self.overlap = [0.0, 0.0]
+        self.activation = [0.0, 0.0]
+        self.total_dur = 0.0
+        self.lambda_param = lambda_param
+        self.normalize_utterances = normalize_utterances
+
+    def val__getitem__(self, idx):
+        """Validation items are generated so that all the chunks in a batch come from the same
+        validation file. These chunks are extracted regularly over all the file, so that the first
+        chunk start at the very beginning of the file, and the last chunk ends at the end of the file.
+        Step between chunks depends of the file duration and the total batch duration. This step can
+        be negative. In that case, chunks are overlapped.
+
+        Parameters
+        ----------
+        idx: int
+            item index. Note: this method may be incompatible with the use of sampler,
+            as this method requires incremental idx starting from 0.
+
+        Returns
+        -------
+        chunk: dict
+            extracted chunk from current validation file. The first chunk contains annotation
+            for the whole file.
+        """
+        # seems to be working kinda slow overall...
+        # how does it work with annotated regions?
+        file_idx = idx // self.batch_size
+        chunk_idx = idx % self.batch_size
+
+        file_id = self.prepared_data["validation-files-diar"][file_idx]
+        validation_mask = self.prepared_data["audio-metadata"][
+            "subset"
+        ] == Subsets.index("development")
+        diar_mask = self.prepared_data["audio-metadata"]["database"] != 0
+        all_valid_files = np.argwhere(validation_mask & diar_mask).flatten()
+        idx_in_val = np.where(all_valid_files == file_id)[0][0]
+        file = next(
+            itertools.islice(self.protocol.development(), idx_in_val, idx_in_val + 1)
+        )
+
+        file_duration = file.get(
+            "duration", Audio("downmix").get_duration(file["audio"])
+        )
+        start_time = chunk_idx * (
+            (file_duration - self.duration) / (self.batch_size - 1)
+        )
+
+        chunk = self.prepare_chunk(file_id, start_time, self.duration)
+
+        if chunk_idx == 0:
+            chunk["annotation"] = file["annotation"]
+
+        chunk["start_time"] = start_time
+
+        return chunk
+
+    def val__len__(self):
+        """Define length for the second validation dataset"""
+        return len(self.prepared_data["validation-files-diar"]) * self.batch_size
 
     def prepare_data(self):
         """Use this to prepare data from task protocol
@@ -247,7 +409,8 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
                     if value not in metadata_unique_values[key]:
                         metadata_unique_values[key].append(value)
                     metadatum[key] = metadata_unique_values[key].index(value)
-
+                elif isinstance(value, Path):
+                    metadatum[key] = str(value)
                 elif isinstance(value, int):
                     metadatum[key] = value
 
@@ -280,9 +443,6 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             # annotated regions and duration
             _annotated_duration = 0.0
             for segment in file["annotated"]:
-                # skip annotated regions that are shorter than training chunk duration
-                # if segment.duration < self.duration:
-                # continue
 
                 # append annotated region
                 annotated_region = (
@@ -448,7 +608,38 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         validation_mask = prepared_data["audio-metadata"]["subset"] == Subsets.index(
             "development"
         )
-        prepared_data["validation-files"] = np.argwhere(validation_mask).reshape((-1,))
+        diar_mask = prepared_data["audio-metadata"]["database"] != 0
+        emb_mask = prepared_data["audio-metadata"]["database"] == 0
+        # we dont want validation chunks to overlap too much
+        length_mask = (
+            prepared_data["audio-annotated"] >= self.batch_size * self.duration / 5
+        )
+
+        # Get all validation files that meet the criteria
+        all_valid_files = np.argwhere(
+            validation_mask & diar_mask & length_mask
+        ).flatten()
+
+        # Group files by database
+        files_by_database = {}
+        for file_idx in all_valid_files:
+            database_idx = prepared_data["audio-metadata"]["database"][file_idx]
+            if database_idx not in files_by_database:
+                files_by_database[database_idx] = []
+            files_by_database[database_idx].append(file_idx)
+
+        # Randomly select at most 10 files from each database
+        selected_files = []
+        rng = np.random.default_rng(seed=42)  # For reproducibility
+        for database_files in files_by_database.values():
+            if len(database_files) > 10:
+                selected_files.extend(
+                    rng.choice(database_files, size=10, replace=False)
+                )
+            else:
+                selected_files.extend(database_files)
+
+        prepared_data["validation-files-diar"] = np.array(selected_files)
 
     def setup(self, stage="fit"):
         """Setup method
@@ -461,34 +652,50 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
 
         super().setup()
 
-        global_scope_mask = (
-            self.prepared_data["annotations-segments"]["global_label_idx"] > -1
-        )
-        train_file_mask = self.prepared_data["audio-metadata"][
-            "subset"
-        ] == Subsets.index("train")
-        train_file_ids = np.where(train_file_mask)[0]
-        train_segment_mask = np.isin(
-            self.prepared_data["annotations-segments"]["file_id"], train_file_ids
-        )
-        mask = train_segment_mask & global_scope_mask
-        self.embedding_files_id = np.unique(
-            self.prepared_data["annotations-segments"]["file_id"][mask]
-        )
-        embedding_classes = np.unique(
-            self.prepared_data["annotations-segments"]["global_label_idx"][mask]
+        self.prepared_data["metadata-values"] = self.prepared_data[
+            "metadata-values"
+        ].tolist()
+
+        self.global_files_id = np.argwhere(
+            self.prepared_data["audio-metadata"]["scope"] > 1
+        ).flatten()
+
+        database_scope_mask = self.prepared_data["audio-metadata"]["scope"] > 0
+        database_indexes = np.unique(
+            self.prepared_data["audio-metadata"][database_scope_mask]["database"]
         )
 
+        classes = {}
+        for idx in database_indexes:
+            database = self.prepared_data["metadata-values"]["database"][idx]
+            # keep database training files
+            database_files_id = np.argwhere(
+                np.logical_and(
+                    self.prepared_data["audio-metadata"]["database"] == idx,
+                    self.prepared_data["audio-metadata"]["subset"]
+                    == Subsets.index("train"),
+                )
+            ).flatten()
+            database_mask = np.isin(
+                self.prepared_data["annotations-segments"]["file_id"], database_files_id
+            )
+            max_idx = max(
+                self.prepared_data["annotations-segments"][database_mask][
+                    "database_label_idx"
+                ]
+            )
+            classes[database] = np.arange(max_idx + 1)
+
         # if there is no file dedicated to the embedding task
-        if self.alpha != 1.0 and len(embedding_classes) == 0:
+        if self.alpha != 1.0 and len(classes) == 0:
             self.num_dia_samples = self.batch_size
             self.alpha = 1.0
             warnings.warn(
                 "No class found for the speaker embedding task. Model will be trained on the speaker diarization task only."
             )
 
-        if self.alpha != 0.0 and np.sum(global_scope_mask) == len(
-            self.prepared_data["annotations-segments"]
+        if self.alpha != 0.0 and len(self.global_files_id) == len(
+            self.prepared_data["audio-metadata"]
         ):
             self.num_dia_samples = 0
             self.alpha = 0.0
@@ -508,11 +715,13 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             duration=self.duration,
             resolution=Resolution.CHUNK,
             problem=Problem.REPRESENTATION,
-            classes=embedding_classes,
+            classes=classes,
         )
         self.specifications = (speaker_diarization, speaker_embedding)
 
-    def prepare_chunk(self, file_id: int, start_time: float, duration: float):
+    def prepare_chunk(
+        self, file_id: int, start_time: float, duration: float, database: str = None
+    ):
         """Prepare chunk
 
         Parameters
@@ -541,13 +750,18 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
 
         # get label scope
         label_scope = Scopes[self.prepared_data["audio-metadata"][file_id]["scope"]]
-        label_scope_key = f"{label_scope}_label_idx"
+        # there is a bug with arcface if we take global_label_idx
+        if label_scope in ["database", "global"]:
+            label_scope_key = "database_label_idx"
+        else:
+            label_scope_key = "file_label_idx"
 
         chunk = Segment(start_time, start_time + duration)
 
         sample = dict()
+        mode = "pad" if self.keep_shorter_segments else "raise"
         sample["X"], _ = self.model.audio.crop(
-            file, chunk, duration=duration, mode="pad"
+            file, chunk, duration=duration, mode=mode
         )
 
         # gather all annotations of current file
@@ -578,10 +792,10 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             pass
 
         # initial frame-level targets
-        num_frames = int(self.model.num_frames(
+        num_frames = self.model.num_frames(
             round(duration * self.model.hparams.sample_rate)
-        ))
-        y = np.zeros((num_frames, num_labels), dtype=np.uint8)
+        )
+        y = np.zeros((int(num_frames), num_labels), dtype=np.uint8)
 
         # map labels to indices
         mapping = {label: idx for idx, label in enumerate(labels)}
@@ -597,7 +811,8 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         metadata = self.prepared_data["audio-metadata"][file_id]
         sample["meta"] = {key: metadata[key] for key in metadata.dtype.names}
         sample["meta"]["file"] = file_id
-
+        # if sample["X"].shape[1] == 48000:
+        #     print(sample["X"].shape)
         return sample
 
     def draw_diarization_chunk(
@@ -621,6 +836,7 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         duration: float
             duration of the chunk to draw
         """
+        # TODO: check that chunk duration not longer than annotated duration
         # select one file at random (wiht probability proportional to its annotated duration)
         file_id = file_ids[cum_prob_annotated_duration.searchsorted(rng.random())]
         # find indices of annotated regions in this file
@@ -653,7 +869,9 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
 
         return (file_id, start_time)
 
-    def draw_embedding_chunk(self, class_id: int, duration: float) -> tuple:
+    def draw_embedding_utterance(
+        self, rng: random.Random, class_id: int, duration: float, file_id=None
+    ) -> tuple:
         """Sample one chunk for the embedding task
 
         Parameters
@@ -673,60 +891,56 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         """
         # get index of the current class in the order of original class list
         # get segments for current class
-        class_segments_idx = (
-            self.prepared_data["annotations-segments"]["global_label_idx"] == class_id
-        )
-        class_segments = self.prepared_data["annotations-segments"][class_segments_idx]
+        if file_id is not None:
+            class_segments_idx = (
+                self.prepared_data["annotations-segments"]["file_id"] == file_id
+            )
+            class_segments = self.prepared_data["annotations-segments"][
+                class_segments_idx
+            ]
+        else:
+            class_segments_idx = (
+                self.prepared_data["annotations-segments"]["global_label_idx"]
+                == class_id
+            )
+            class_segments = self.prepared_data["annotations-segments"][
+                class_segments_idx
+            ]
 
         # sample one segment from all the class segments:
         segments_duration = class_segments["end"] - class_segments["start"]
         segments_total_duration = np.sum(segments_duration)
+        # segment probability should be zero if duration less than duration but add to one
         prob_segments = segments_duration / segments_total_duration
-        segment = np.random.choice(class_segments, p=prob_segments)
+        prob_segments[segments_duration < duration] = 0
+        # Renormalize probabilities to sum to 1 after zeroing out invalid segments
+        if np.sum(prob_segments) > 0:
+            prob_segments = prob_segments / np.sum(prob_segments)
+        else:
+            # If no valid segments remain, raise an error
+            raise ValueError(
+                f"No valid segments of duration {duration}s or longer found for class {class_id}"
+            )
+        segment = rng.choice(class_segments, p=prob_segments)
 
-        # sample chunk start time in order to intersect it with the sampled segment
-        start_time = np.random.uniform(
-            segment["start"],
-            segment["end"] - duration,
-        )
-
-        return (segment["file_id"], start_time)
+        return (segment["file_id"], segment)
 
     def train__iter__helper(self, rng: random.Random, **filters):
-        """Iterate over training samples with optional domain filtering
-
-        Parameters
-        ----------
-        rng : random.Random
-            Random number generator
-        filters : dict, optional
-            When provided (as {key : value} dict), filter training files so that
-            only file such as file [key] == value are used for generating chunks
-
-        Yields
-        ------
-        chunk : dict
-        Training chunks
-        """
-
-        # indices of training files that matches domain filters
-        training = self.prepared_data["audio-metadata"]["subset"] == Subsets.index(
+        training_mask = self.prepared_data["audio-metadata"]["subset"] == Subsets.index(
             "train"
         )
         for key, value in filters.items():
-            training &= self.prepared_data["audio-metadata"][key] == self.prepared_data[
-                "metadata"
-            ][key].index(value)
-        file_ids = np.where(training)[0]
-        # get the subset of embedding database files from training files
-        embedding_files_ids = file_ids[np.isin(file_ids, self.embedding_files_id)]
+            training_mask &= self.prepared_data["audio-metadata"][
+                key
+            ] == self.prepared_data["metadata"][key].index(value)
+        file_ids = np.where(training_mask)[0]
+
+        diar_mask = self.prepared_data["audio-metadata"]["database"] != 0
+        diar_files_ids = np.where(diar_mask & training_mask)[0]
+        embedding_files_ids = file_ids[np.isin(file_ids, self.global_files_id)]
 
         if self.num_dia_samples > 0:
-            annotated_duration = self.prepared_data["audio-annotated"][file_ids]
-            # set duration of files for the embedding part to zero, in order to not
-            # drawn them for diarization part
-            annotated_duration[embedding_files_ids] = 0.0
-
+            annotated_duration = self.prepared_data["audio-annotated"][diar_files_ids]
             cum_prob_annotated_duration = np.cumsum(
                 annotated_duration / np.sum(annotated_duration)
             )
@@ -734,32 +948,357 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         duration = self.duration
         batch_size = self.batch_size
 
-        # use original order for the first run on the shuffled classes list:
-        # should be shuffled since otherwise each data loader will have the same order of classes initially
-        emb_task_classes = self.specifications[Subtasks.index("embedding")].classes[:]
+        emb_task_classes = deepcopy(
+            self.specifications[Subtasks.index("embedding")].classes["VoxCeleb"]
+        )
         rng.shuffle(emb_task_classes)
-
         sample_idx = 0
         embedding_class_idx = 0
+
+        X_utterances: List[torch.Tensor] = []
+        y_utterances: List[int] = []
+        delays: List[float] = []
+        utterance_durations: List[float] = []
+        mixture_file_ids: List[int] = []
+        klasses: List[str] = []
+        files: List[int] = []
+
         while True:
             if sample_idx < self.num_dia_samples:
                 file_id, start_time = self.draw_diarization_chunk(
-                    file_ids, cum_prob_annotated_duration, rng, duration
+                    diar_files_ids, cum_prob_annotated_duration, rng, duration
                 )
-            else:
-                # shuffle embedding classes list and go through this shuffled list
-                # to make sure to see all the speakers during training
-                if embedding_class_idx == len(emb_task_classes):
-                    rng.shuffle(emb_task_classes)
-                    embedding_class_idx = 0
-                klass = emb_task_classes[embedding_class_idx]
-                embedding_class_idx += 1
-                file_id, start_time = self.draw_embedding_chunk(klass, duration)
+                sample_diar = self.prepare_chunk(file_id, start_time, duration)
+                sample_idx = (sample_idx + 1) % batch_size
+                yield sample_diar
+                continue
 
-            sample = self.prepare_chunk(file_id, start_time, duration)
+            if embedding_class_idx + self.max_speakers_per_chunk > len(emb_task_classes):
+                rng.shuffle(emb_task_classes)
+                embedding_class_idx = 0
+            current_mixture_classes = emb_task_classes[
+                embedding_class_idx : embedding_class_idx + self.max_speakers_per_chunk
+            ]
+            embedding_class_idx += self.max_speakers_per_chunk
+
+            class_available_times = {klass: 0.0 for klass in current_mixture_classes}
+
+            num_utterances_in_mixture = rng.integers(
+                1, self.max_speakers_per_chunk + 1
+            )
+
+            X_utterances: List[torch.Tensor] = []
+            delays: List[float] = []
+            klasses: List[str] = []
+
+            current_time = 0.0
+
+            silence_in_the_end = rng.uniform(-9, 1.0)
+            if silence_in_the_end < 0.0:
+                silence_in_the_end = 0.0
+
+            while True:
+                if (
+                    len(X_utterances) >= num_utterances_in_mixture
+                    and delays[-1] + utterance_durations[-1] + silence_in_the_end
+                    > self.duration
+                ):
+                    break
+
+                available_classes = [
+                    klass
+                    for klass, avail_time in class_available_times.items()
+                    if avail_time <= current_time
+                ]
+
+                if not available_classes:
+                    next_available_time = min(class_available_times.values())
+                    buffer_time = 0.5
+                    current_time = next_available_time + buffer_time
+                    available_classes = [
+                        klass
+                        for klass, avail_time in class_available_times.items()
+                        if avail_time <= current_time
+                    ]
+
+                klass = rng.choice(available_classes)
+
+                def truncated_exponential(rng, lambda_param, low, high):
+                    F_low = 1 - np.exp(-lambda_param * low)
+                    F_high = 1 - np.exp(-lambda_param * high)
+                    u = rng.uniform(F_low, F_high)
+                    return -np.log(1 - u) / lambda_param
+
+                lambda_param = self.lambda_param
+                low, high = 2.0, 10.0
+                utterance_duration = truncated_exponential(rng, lambda_param, low, high)
+
+                min_delay = current_time - class_available_times[klass]
+                min_delay = max(min_delay, 0.0)
+                delay = self.calculate_delay(
+                    rng, utterance_durations, delays, extension=1.0, min_delay=min_delay
+                )
+
+                utterance_start_time = current_time + delay
+
+                try:
+                    file_id, speech_turn = self.draw_embedding_utterance(
+                        rng,
+                        klass,
+                        utterance_duration,
+                    )
+                except ValueError:
+                    continue
+
+                delays.append(delay)
+                utterance_durations.append(utterance_duration)
+                mixture_file_ids.append(file_id)
+                file = self.get_file(file_id)
+                X = self.process_speech_turn(
+                    file, rng, speech_turn, utterance_duration, delay
+                )
+                if self.normalize_utterances:
+                    X = self.normalize_tensor(X)
+                X_utterances.append(X)
+                y_utterances.append(klass)
+                klasses.append(klass)
+                files.append(file_id)
+
+                class_available_times[klass] = utterance_start_time + utterance_duration
+
+            mixture = self.create_mixtures(X_utterances, delays, rng=rng)
+            activation_features, unique_klasses = self.compute_activation_features(
+                X_utterances, delays, klasses
+            )
+
+            num_frames = self.model.num_frames(
+                round(duration * self.model.hparams.sample_rate)
+            )
+
+            y = (
+                activation_features.transpose(0, 1)
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.uint8)
+            )
+
+            labels = unique_klasses.copy()
+            sample = {
+                "X": mixture,
+                "y": SlidingWindowFeature(y, self.model.receptive_field, labels=labels),
+                "meta": {
+                    "subset": 0,
+                    "database": 0,
+                    "file": mixture_file_ids[-1],
+                    "scope": 2,
+                },
+            }
+
+            num_utterances = 0
+            X_utterances = []
+            y_utterances = []
+            delays = []
+            utterance_durations = []
+            mixture_file_ids = []
             sample_idx = (sample_idx + 1) % batch_size
+            klasses = []
+            files = []
 
-            yield sample
+            yield deepcopy(sample)
+
+    def calculate_delay(
+        self,
+        rng: np.random.Generator,
+        utterance_durations: List[float],
+        delays: List[float],
+        extension: float = 1.0,
+        min_delay: float = 0.0,
+    ) -> float:
+        """Calculate the delay for the current utterance, allowing for extended silence.
+
+        Parameters
+        ----------
+        rng : np.random.Generator
+            Random number generator
+        utterance_durations : List[float]
+            List of utterance durations
+        delays : List[float]
+            List of previous delays
+        extension : float, optional
+            Additional maximum delay in seconds, by default 1.0
+
+        Returns
+        -------
+        float
+            Calculated delay
+        """
+        if not utterance_durations:
+            # First utterance can be delayed by up to 1 second
+            delay = rng.uniform(-9.0, 1.0)
+            if delay < 0.0:
+                delay = 0.0
+        else:
+            previous_delay = delays[-1]
+            previous_duration = utterance_durations[-1]
+            # Allow up to 1 second more than previous duration
+            min_delay = max(min_delay, 0.5)
+            delay = (
+                rng.uniform(min_delay, previous_duration + extension) + previous_delay
+            )
+        return delay
+
+    def select_speech_turn(
+        self, rng: np.random.Generator, file: Dict, utterance_duration: float
+    ) -> Segment:
+        """Select a speech turn from the file, weighted by duration."""
+        if not file["speech_turns"]:
+            raise ValueError("No speech turns available in the selected file.")
+        durations = [s.duration for s in file["speech_turns"]]
+        total_duration = sum(durations)
+        probabilities = [d / total_duration for d in durations]
+
+        speech_turn = rng.choice(
+            file["speech_turns"],
+            p=probabilities,
+        )
+        return speech_turn
+
+    def process_speech_turn(
+        self,
+        file: Dict,
+        rng: np.random.Generator,
+        speech_turn: Segment,
+        utterance_duration: float,
+        delay: float,
+    ) -> torch.Tensor:
+        """Process the speech turn by cropping or padding as necessary."""
+        # speech turn is actually a segment
+        duration = speech_turn["end"] - speech_turn["start"]
+        if duration < utterance_duration:
+            segment = Segment(speech_turn["start"], speech_turn["end"])
+            X, _ = self.model.audio.crop(file, segment)
+            num_missing_samples = (
+                math.floor(utterance_duration * self.model.audio.sample_rate)
+                - X.shape[1]
+            )
+            X = F.pad(X, (0, num_missing_samples))
+        else:
+            start_time = rng.uniform(
+                speech_turn["start"], speech_turn["end"] - utterance_duration
+            )
+            chunk = Segment(start_time, start_time + utterance_duration)
+            X, _ = self.model.audio.crop(
+                file,
+                chunk,
+                duration=utterance_duration,
+            )
+        return X
+
+    def create_mixtures(
+        self,
+        utterances: List[torch.Tensor],
+        delays: List[float],
+        rng: np.random.Generator,
+        target_len: float = 10.0,
+        sample_rate: int = 16000,
+    ) -> torch.Tensor:
+        """Create a mixture of audio utterances with random delays and gains."""
+        target_len_samples = int(target_len * sample_rate)
+        mixture = torch.zeros(1, target_len_samples)
+
+        for utt, delay in zip(utterances, delays):
+            start = int(delay * sample_rate)
+            end = start + utt.shape[1]
+
+            if end > target_len_samples:
+                end = target_len_samples
+                utt = utt[:, : end - start]
+            if end - start < target_len_samples * 0.05:
+                continue  # Skip if the utterance segment is too short
+
+            gain_db = rng.uniform(0, 5)
+            gain = self.db_to_amplitude(gain_db)
+            mixture[:, start:end] += utt * gain
+
+        if mixture.abs().sum() == 0:
+            raise ValueError("Mixture is silent. Adjust delays or durations.")
+
+        return mixture
+
+    @staticmethod
+    def db_to_amplitude(db: float) -> float:
+        """Convert decibel value to amplitude."""
+        return 10 ** (db / 20)
+
+    def compute_activation_features(
+        self,
+        utterances: List[torch.Tensor],
+        delays: List[float],
+        klasses: List[str],
+        target_len: float = 10.0,
+        num_frames: int = 499,
+        sample_rate: int = 16000,
+    ) -> torch.Tensor:
+        """
+        Compute activation features for each speaker.
+
+        Parameters
+        ----------
+        utterances : List[torch.Tensor]
+            List of utterance tensors.
+        delays : List[float]
+            List of delays for each utterance.
+        klasses : List[str]
+            List of speaker classes corresponding to each utterance.
+        target_len : float, optional
+            Target length of the mixture in seconds, by default 10.0.
+        num_frames : int, optional
+            Number of frames for activation features, by default 499.
+        sample_rate : int, optional
+            Sampling rate in Hz, by default 16000.
+
+        Returns
+        -------
+        torch.Tensor
+            Activation features tensor of shape (num_speakers, 2, num_frames).
+        """
+        target_len_samples = int(target_len * sample_rate)
+        unique_klasses = sorted(set(klasses))
+        num_speakers = len(unique_klasses)
+
+        binary_tensor = torch.zeros(num_speakers, 1, target_len_samples)
+
+        klass_to_idx = {klass: idx for idx, klass in enumerate(unique_klasses)}
+
+        for i, (utt, delay) in enumerate(zip(utterances, delays)):
+            klass = klasses[i]
+            speaker_idx = klass_to_idx[klass]
+            start = int(delay * sample_rate)
+            end = start + utt.shape[1]
+
+            if end > target_len_samples:
+                end = target_len_samples
+                utt = utt[:, : end - start]
+
+            if end - start < target_len_samples * 0.05:
+                continue
+
+            binary_tensor[speaker_idx, 0, start:end] = 1.0
+
+        # # Compute "any other speaker active" channel
+        # binary_tensor[:, 1, :] = (binary_tensor[:, 0, :].sum(dim=0, keepdim=True) > 0).float() - binary_tensor[:, 0, :]
+
+        binary_tensor = binary_tensor.clamp(min=0.0)
+
+        interp_signals = F.interpolate(
+            binary_tensor, size=num_frames, mode="nearest"
+        )  # Shape: (num_speakers, 2, num_frames)
+
+        activation_features = interp_signals.squeeze(
+            1
+        )  # Shape: (num_speakers, num_frames)
+        return activation_features, unique_klasses
 
     def train__iter__(self):
         """Iterate over trainig samples
@@ -819,11 +1358,12 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             extracted chunk from current validation file. The first chunk contains annotation
             for the whole file.
         """
-
+        # seems to be working kinda slow overall...
+        # how does it work with annotated regions?
         file_idx = idx // self.batch_size
         chunk_idx = idx % self.batch_size
 
-        file_id = self.prepared_data["validation-files"][file_idx]
+        file_id = self.prepared_data["validation-files-diar"][file_idx]
         file = next(
             itertools.islice(self.protocol.development(), file_idx, file_idx + 1)
         )
@@ -844,9 +1384,56 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
 
         return chunk
 
-    def val__len__(self):
-        """Return total length of validation, which is num_validation_files * batch_size"""
-        return len(self.prepared_data["validation-files"]) * self.batch_size
+    def collate_y_val(self, batch) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        batch : list
+            List of samples to collate.
+            "y" field is expected to be a SlidingWindowFeature.
+
+        Returns
+        -------
+        y : torch.Tensor
+            Collated target tensor of shape (num_frames, self.max_speakers_per_chunk)
+            If one chunk has more than `self.max_speakers_per_chunk` speakers, we keep
+            the max_speakers_per_chunk most talkative ones. If it has less, we pad with
+            zeros (artificial inactive speakers).
+        """
+
+        collated_y_dia = []
+
+        for b in batch:
+            # diarization reference
+            y_dia = b["y"].data
+            labels = b["y"].labels
+            num_speakers = len(labels)
+            # embedding reference
+
+            if num_speakers > self.max_speakers_per_chunk:
+                # sort speakers in descending talkativeness order
+                indices = np.argsort(-np.sum(y_dia, axis=0), axis=0)
+                # keep only the most talkative speakers
+                y_dia = y_dia[:, indices[: self.max_speakers_per_chunk]]
+
+            elif (
+                num_speakers < self.max_speakers_per_chunk
+                and y_dia.shape[1] < self.max_speakers_per_chunk
+            ):
+                # create inactive speakers by zero padding
+                y_dia = np.pad(
+                    y_dia,
+                    ((0, 0), (0, self.max_speakers_per_chunk - num_speakers)),
+                    mode="constant",
+                )
+
+            collated_y_dia.append(y_dia)
+
+        return torch.from_numpy(np.stack(collated_y_dia))
+
+    def collate_fn_val1(self, batch, stage="train"):
+        collated = default_collate(batch)
+        return collated
 
     def collate_y(self, batch) -> torch.Tensor:
         """
@@ -884,22 +1471,25 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
                 # TODO: we should also sort the speaker labels in the same way
 
                 # if current chunck is for the embedding subtask
-                if b["meta"]["scope"] > 1:
+                if b["meta"]["scope"] > 0:
                     labels = np.array(labels)
                     y_emb = labels[indices[: self.max_speakers_per_chunk]]
 
-            elif num_speakers < self.max_speakers_per_chunk:
+            elif (
+                num_speakers < self.max_speakers_per_chunk
+                and y_dia.shape[1] < self.max_speakers_per_chunk
+            ):
                 # create inactive speakers by zero padding
                 y_dia = np.pad(
                     y_dia,
                     ((0, 0), (0, self.max_speakers_per_chunk - num_speakers)),
                     mode="constant",
                 )
-                if b["meta"]["scope"] > 1:
+                if b["meta"]["scope"] > 0:
                     y_emb[:num_speakers] = labels[:]
 
             else:
-                if b["meta"]["scope"] > 1:
+                if b["meta"]["scope"] > 0:
                     y_emb[:num_speakers] = labels[:]
 
             collated_y_dia.append(y_dia)
@@ -907,7 +1497,7 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
 
         return (
             torch.from_numpy(np.stack(collated_y_dia)),
-            torch.from_numpy(np.stack(collate_y_emb)).squeeze(1),
+            torch.from_numpy(np.stack(collate_y_emb)),
         )
 
     def collate_fn(self, batch, stage="train"):
@@ -930,46 +1520,86 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             Collated batch as {"X": torch.Tensor, "y": torch.Tensor} dict (train).
             Collated batch as {"X": torch.Tensor, "annotation": Annotation, "start_times": list} dict (validation)
         """
-
-        # collate X
         collated_X = self.collate_X(batch)
-        # collate y
-        collated_y_dia, collate_y_emb = self.collate_y(batch)
 
-        # collate metadata
+        collated_y_dia, collated_y_emb = self.collate_y(batch)
+
         collated_meta = self.collate_meta(batch)
 
-        # apply augmentation (only in "train" stage)
-        self.augmentation.train(mode=(stage == "train"))
-        augmented = self.augmentation(
-            samples=collated_X,
-            sample_rate=self.model.hparams.sample_rate,
-            targets=collated_y_dia.unsqueeze(1),
-        )
+        if self.noise_augmentation or self.rir_augmentation:
+            # only augment VoxCeleb
+            mask = collated_meta["database"] == 0
+
+            if mask.any():
+                samples_to_augment = collated_X[mask]
+
+                if self.noise_augmentation:
+                    self.noise_augmentation.train(mode=(stage == "train"))
+                    samples_to_augment = self.noise_augmentation(
+                        samples=samples_to_augment,
+                        sample_rate=self.model.hparams.sample_rate,
+                    )["samples"]
+
+                collated_X[mask] = samples_to_augment
+
         collated_batch = {
-            "X": augmented.samples,
-            "y_dia": augmented.targets.squeeze(1),
-            "y_emb": collate_y_emb,
+            "X": collated_X,
+            "y_dia": collated_y_dia,
+            "y_emb": collated_y_emb,
             "meta": collated_meta,
         }
 
+        # Include additional information for validation stage
         if stage == "val":
             collated_batch["annotation"] = batch[0]["annotation"]
             collated_batch["start_times"] = [b["start_time"] for b in batch]
+            collated_batch["y"] = self.collate_y_val(batch)
 
         return collated_batch
 
     def setup_loss_func(self):
-        # check if model has pre-trained arcface weights
-        if hasattr(self.model, "arc_face_loss"):
-            return
-        self.model.arc_face_loss = ArcFaceLoss(
-            len(self.specifications[Subtasks.index("embedding")].classes),
-            self.model.hparams["embedding_dim"],
-            margin=self.margin,
-            scale=self.scale,
-            weight_init_func=nn.init.xavier_normal_
-        )
+
+        classes = self.specifications[Subtasks.index("embedding")].classes
+        # define a loss for each database-scope dataset
+        arcface_losses = []
+        available_databases = 0
+        for database in classes:
+            # we might have trained arc face weights on VoxCeleb
+            if hasattr(self.model, "arc_face_loss") and hasattr(
+                getattr(self.model, "arc_face_loss"), database
+            ):
+                available_databases += 1
+            if database != "VoxCeleb":
+                arcface_losses.append(
+                    (
+                        database,
+                        ArcFaceLoss(
+                            len(classes[database]),
+                            self.model.hparams["embedding_dim"],
+                            margin=self.small_margin,
+                            scale=self.scale,
+                            weight_init_func=nn.init.xavier_normal_,
+                        ).to(self.model.device),
+                    )
+                )
+
+            else:
+                arcface_losses.append(
+                    (
+                        database,
+                        ArcFaceLoss(
+                            len(classes[database]),
+                            self.model.hparams["embedding_dim"],
+                            margin=self.margin,
+                            scale=self.scale,
+                            weight_init_func=nn.init.xavier_normal_,
+                        ).to(self.model.device),
+                    )
+                )
+        if available_databases < 2:
+            self.model.arc_face_loss = nn.ModuleDict(
+                {database: loss_func for database, loss_func in arcface_losses}
+            )
 
     def segmentation_loss(
         self,
@@ -1026,19 +1656,10 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             Permutation-invariant diarization loss
         """
 
-        # Compute segmentation loss
         dia_loss = self.segmentation_loss(prediction, permutated_target)
-        self.model.log(
-            "loss/train/dia",
-            dia_loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
         return dia_loss
 
-    def compute_embedding_loss(self, emb_prediction, target_emb, valid_embs):
+    def compute_embedding_loss(self, emb_prediction, target_emb, valid_embs, database):
         """Compute loss for the speaker embeddings extraction subtask
 
         Parameters
@@ -1054,41 +1675,36 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         emb_loss : torch.Tensor
             arcface loss for the current batch
         """
-        if embeddings[1] == 1:
-            # no pooling between diarization and embedding branches 
-            diarization_pooling = False
-        else:
-            diarization_pooling = True
 
-        # Get speaker representations from the embedding subtask
-        embeddings = rearrange(emb_prediction, "b s e -> (b s) e")
-        # Get corresponding target label
+        if len(emb_prediction.shape) == 3:
+            embeddings = rearrange(emb_prediction, "b s e -> (b s) e")
+        else:
+            embeddings = emb_prediction
         targets = rearrange(target_emb, "b s -> (b s)")
-        # compute loss only on global scope speaker embedding
         valid_embs = rearrange(valid_embs, "b s -> (b s)")
-        # compute the loss
-        if diarization_pooling:
-            emb_loss = self.model.arc_face_loss(
+
+        emb_loss = torch.tensor(0)
+        if self.diar_pooling:
+            emb_loss = self.model.arc_face_loss[database](
                 embeddings[valid_embs, :], targets[valid_embs]
             )
         else:
-            # TODO: there is definitely a better way to do this
+            raise ValueError("diar_pooling False not supported for multi-aam")
             max_pool = nn.MaxPool1d(kernel_size=3, stride=3)
             converted_targets = max_pool(targets.unsqueeze(0).float()).squeeze(0).long()
             converted_valid_embs = (
                 max_pool(valid_embs.unsqueeze(0).float()).squeeze(0).bool()
             )
-            emb_loss = self.model.arc_face_loss(
+            emb_loss = self.model.arc_face_loss[database](
                 embeddings[converted_valid_embs, :],
                 converted_targets[converted_valid_embs],
             )
 
-        # skip batch if something went wrong for some reason
         if torch.isnan(emb_loss):
             return None
 
         self.model.log(
-            "loss/train/arcface",
+            f"loss/train/arcface/{database}",
             emb_loss,
             on_step=True,
             on_epoch=True,
@@ -1113,13 +1729,9 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             {"loss": loss}
         """
 
-        # batch waveforms (batch_size, num_channels, num_samples)
         waveform = batch["X"]
-        # batch diarization references (batch_size, num_channels, num_speakers)
         target_dia = batch["y_dia"]
-        # batch embedding references (batch, num_speakers)
         target_emb = batch["y_emb"]
-
         # drop samples that contain too many speakers
         num_speakers = torch.sum(torch.any(target_dia, dim=1), dim=1)
         keep = num_speakers <= self.max_speakers_per_chunk
@@ -1129,14 +1741,13 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         waveform = waveform[keep]
 
         num_remaining_dia_samples = torch.sum(keep[: self.num_dia_samples])
-
+        batch_size = keep.shape[0]
         # corner case
         if not keep.any():
             return None
 
         # forward pass
         dia_prediction, emb_prediction = self.model(waveform)
-        # (batch_size, num_frames, num_cls), (batch_size, num_spk, emb_size)
 
         # get the best permutation
         dia_multilabel = self.model.powerset.to_multilabel(dia_prediction)
@@ -1145,37 +1756,96 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             torch.arange(target_emb.shape[0]).unsqueeze(1), permut_map
         ]
 
-        # an embedding is valid only if corresponding speaker is active in the diarization prediction and reference
-        active_speaker_pred = torch.any(dia_multilabel > 0, dim=1)
-        active_speaker_ref = torch.any(permutated_target_dia == 1, dim=1)
-        valid_embs = torch.logical_and(active_speaker_pred, active_speaker_ref)[
-            num_remaining_dia_samples:
-        ]
+        agree = permutated_target_dia == dia_multilabel
+        agree_pos = torch.logical_and(dia_multilabel > 0, agree)
+        valid_embs = torch.sum(agree_pos, dim=1) > 0.1 * dia_multilabel.shape[1]
 
         permutated_target_powerset = self.model.powerset.to_powerset(
             permutated_target_dia.float()
         )
 
-        dia_prediction = dia_prediction[:num_remaining_dia_samples]
-        permutated_target_powerset = permutated_target_powerset[
-            :num_remaining_dia_samples
-        ]
+        dia_prediction = dia_prediction
+        permutated_target_powerset = permutated_target_powerset
 
         dia_loss = torch.tensor(0)
+
         # if batch contains diarization subtask chunks, then compute diarization loss on these chunks:
-        if self.alpha != 0.0 and torch.any(keep[: self.num_dia_samples]):
-            dia_loss = self.compute_diarization_loss(
-                dia_prediction, permutated_target_powerset
+        if self.alpha != 0.0 and self.dia_task_rate != 0.0:
+            dia_loss_vc = self.compute_diarization_loss(
+                dia_prediction[num_remaining_dia_samples:],
+                permutated_target_powerset[num_remaining_dia_samples:],
+            )
+            dia_loss_ami = self.compute_diarization_loss(
+                dia_prediction[:num_remaining_dia_samples],
+                permutated_target_powerset[:num_remaining_dia_samples],
+            )
+            self.model.log(
+                "loss/train/dia_voxceleb",
+                dia_loss_vc,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
+            self.model.log(
+                "loss/train/dia_ami",
+                dia_loss_ami,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
             )
 
-        emb_loss = torch.tensor(0)
+            dia_loss = (
+                num_remaining_dia_samples * dia_loss_ami
+                + (batch_size - num_remaining_dia_samples)
+                * dia_loss_vc
+                * self.vc_dia_weight
+            )
+            dia_loss = dia_loss / batch_size
+        # to model device
+        emb_loss = torch.tensor(0).to(self.model.device)
         # if batch contains embedding subtask chunks, then compute embedding loss on these chunks:
         if self.alpha != 1.0 and torch.any(valid_embs):
-            emb_prediction = emb_prediction[num_remaining_dia_samples:]
-            permutated_target_emb = permutated_target_emb[num_remaining_dia_samples:]
-            emb_loss = self.compute_embedding_loss(
-                emb_prediction, permutated_target_emb, valid_embs
-            )
+
+            if self.dia_task_rate != 1.0:
+                emb_database = "VoxCeleb"
+                emb_loss = (
+                    self.compute_embedding_loss(
+                        emb_prediction[num_remaining_dia_samples:],
+                        permutated_target_emb[num_remaining_dia_samples:],
+                        valid_embs[num_remaining_dia_samples:],
+                        emb_database,
+                    )
+                    * (batch_size - num_remaining_dia_samples)
+                    / batch_size
+                )
+
+                emb_database_idx = batch["meta"]["database"][0]
+                emb_database = self.prepared_data["metadata-values"]["database"][
+                    emb_database_idx
+                ]
+                emb_loss_ami = None
+
+                if emb_loss_ami is not None:
+                    emb_loss += (
+                        self.ami_aam_weight
+                        * emb_loss_ami
+                        * num_remaining_dia_samples
+                        / batch_size
+                    )
+
+            else:
+                emb_database_idx = batch["meta"]["database"][0]
+                emb_database = self.prepared_data["metadata-values"]["database"][
+                    emb_database_idx
+                ]
+                emb_loss = self.compute_embedding_loss(
+                    emb_prediction[:num_remaining_dia_samples],
+                    permutated_target_emb[:num_remaining_dia_samples],
+                    valid_embs[:num_remaining_dia_samples],
+                    emb_database,
+                )
             loss = self.alpha * dia_loss + (1 - self.alpha) * emb_loss
         else:
             loss = self.alpha * dia_loss
@@ -1184,19 +1854,35 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         if not self.model.automatic_optimization:
             optimizers = self.model.optimizers()
             optimizers = optimizers if isinstance(optimizers, list) else [optimizers]
-            for optimizer in optimizers:
-                optimizer.zero_grad()
 
-            self.model.manual_backward(loss)
+            num_accumulate_batches = self.gradient["accumulate_batches"]
+            if batch_idx % num_accumulate_batches == 0:
+                for optimizer in optimizers:
+                    optimizer.zero_grad()
 
-            for optimizer in optimizers:
-                self.model.clip_gradients(
-                    optimizer,
-                    gradient_clip_val=self.model.gradient_clip_val,
-                    gradient_clip_algorithm="norm",
-                )
-                optimizer.step()
-                
+            scaled_loss = loss / num_accumulate_batches
+
+            self.model.manual_backward(scaled_loss)
+
+            if (batch_idx + 1) % num_accumulate_batches == 0:
+                for optimizer in optimizers:
+                    self.model.clip_gradients(
+                        optimizer,
+                        # gradient_clip_val=90,
+                        # gradient_clip_algorithm="autoclip",
+                        gradient_clip_val=5.0,
+                        gradient_clip_algorithm="norm",
+                    )
+                    optimizer.step()
+
+            if self.model.lr_schedulers() is not None:
+                sch = self.model.lr_schedulers()
+                if isinstance(sch, list):
+                    for s in sch:
+                        s.step()
+                else:
+                    sch.step()
+
         return {"loss": loss}
 
     def reconstruct(
@@ -1243,115 +1929,24 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
 
         return clustered_segmentations
 
-    # def aggregate(
-    #     self, segmentations: SlidingWindowFeature, pad_duration: float
-    # ) -> SlidingWindowFeature:
-    #     """ "Aggregate segmentation chunks over time with padding between
-    #     each chunk.
-
-    #     Parameters
-    #     ----------
-    #     segmentations: SlidingWindowFeature
-    #         unaggragated segmentation chunks. Shape is (num_chunks, num_frames, num_speakers).
-    #     pad_duration: float
-    #         padding duration between two consecutive segmentation chunks.
-    #         In case pad_duration is < 0. (overlapped segmentation chunks),
-    #         `Inference.aggregate()` is used.
-
-    #     Returns
-    #     -------
-    #     segmentation: SlidingWindowFeature
-    #         aggregated segmentation. Shape is (num_frames', num_speakers).
-    #     """
-
-    #     num_chunks, num_frames, num_speakers = segmentations.data.shape
-    #     frame_duration = segmentations.sliding_window.duration / num_frames
-
-    #     window = SlidingWindow(step=frame_duration, duration=frame_duration)
-
-    #     if num_chunks == 1:
-    #         return SlidingWindowFeature(segmentations[0], window)
-
-    #     # if segmentation chunks are overlaped
-    #     if pad_duration < 0.0:
-    #         return Inference.aggregate(segmentations, window)
-
-    #     num_padding_frames = np.round(pad_duration / frame_duration).astype(np.uint32)
-    #     aggregated_segmentation = segmentations[0]
-
-    #     for chunk_segmentation in segmentations[1:]:
-    #         padding = np.zeros((num_padding_frames, num_speakers))
-    #         aggregated_segmentation = np.concatenate(
-    #             (aggregated_segmentation, padding, chunk_segmentation)
-    #         )
-
-    #     return SlidingWindowFeature(aggregated_segmentation.astype(np.int8), window)
-
-    # def to_diarization(
-    #     self,
-    #     segmentations: SlidingWindowFeature,
-    #     pad_duration: float = 0.0,
-    # ) -> SlidingWindowFeature:
-    #     """Build diarization out of preprocessed segmentation
-
-    #     Parameters
-    #     ----------
-    #     segmentations : SlidingWindowFeature
-    #         (num_chunks, num_frames, num_speakers)-shaped segmentations
-    #     pad_duration: float,
-    #         padding duration between two consecutive segmentation chunks.
-    #         Can be negative (overlapped chunks).
-
-    #     Returns
-    #     -------
-    #     discrete_diarization : SlidingWindowFeature
-    #         Discrete (0s and 1s) diarization. Shape is (num_frames', num_speakers')
-    #     """
-
-    #     activations = self.aggregate(segmentations, pad_duration=pad_duration)
-    #     # shape: (num_frames, num_speakers)
-    #     _, num_speakers = activations.data.shape
-
-    #     count = np.sum(activations, axis=1, keepdims=True)
-    #     # shape: (num_frames, 1)
-
-    #     max_speakers_per_frame = np.max(count.data)
-    #     if num_speakers < max_speakers_per_frame:
-    #         activations.data = np.pad(
-    #             activations.data, ((0, 0), (0, max_speakers_per_frame - num_speakers))
-    #         )
-
-    #     extent = activations.extent & count.extent
-    #     activations = activations.crop(extent, return_data=False)
-    #     count = count.crop(extent, return_data=False)
-
-    #     sorted_speakers = np.argsort(-activations, axis=-1)
-    #     binary = np.zeros_like(activations.data)
-
-    #     for t, ((_, c), speakers) in enumerate(zip(count, sorted_speakers)):
-    #         for i in range(c.item()):
-    #             binary[t, speakers[i]] = 1.0
-
-    #     return SlidingWindowFeature(binary, activations.sliding_window)
-
     def compute_metrics(
         self,
         discretized_reference,
         prediction: Tuple[SlidingWindowFeature, np.ndarray],
         oracle_mode: bool,
     ) -> None:
-        """Compute (oracle) Diarization Error Rate at file level 
+        """Compute (oracle) Diarization Error Rate at file level
         given the reference and hypothesis.
-        DER is only computed on parts of the validation file 
+        DER is only computed on parts of the validation file
         that were used to build validation batch.
 
         Parameters
         ----------
         discretized_reference: np.ndarray
-            cropped file's discretized reference matching parts 
+            cropped file's discretized reference matching parts
             of the validation file used to build current batch
         prediction: (pyannote.core.SlidingWindowFeature, np.ndarray)
-            tuple containing unclustered segmentation chunks 
+            tuple containing unclustered segmentation chunks
             and clusters from the clustering step
         oracle_mode: boolean
             Whether to compute DER or oracle DER
@@ -1398,7 +1993,7 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         batch_idx: int
             Batch index.
         """
-        # get reference
+
         reference = batch["annotation"]
         num_speakers = len(reference.labels())
 
@@ -1443,7 +2038,7 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         # convert from powerset segmentations to multilabel segmentations
         binarized_segmentations = self.model.powerset.to_multilabel(segmentations)
 
-        # gradient is uneeded here, so we can detach tensors from the gradient graph
+        # gradient is not needed here, so we can detach tensors from the gradient graph
         binarized_segmentations = binarized_segmentations.cpu().detach().numpy()
         embeddings = embeddings.cpu().detach().numpy()
 
@@ -1456,6 +2051,7 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
 
         # compute file-wise diarization error rate
         clustering = KMeansClustering()
+
         clusters, _, _ = clustering(
             embeddings=embeddings,
             segmentations=binarized_segmentations,
@@ -1480,6 +2076,22 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             oracle_mode=True,
         )
 
+        # let's also calculate standard DER
+        target = batch["y"]
+        multilabel = self.model.powerset.to_multilabel(segmentations)
+
+        self.model.validation_metric(
+            torch.transpose(multilabel, 1, 2),
+            torch.transpose(target, 1, 2),
+        )
+        self.model.log_dict(
+            self.model.validation_metric,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+
         return None
 
     def default_metric(
@@ -1488,4 +2100,15 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
         """Returns diarization error rate and its components for diarization subtask,
         and equal error rate for the embedding part
         """
-        return {}
+        return {
+            "LocalDiarizationErrorRate": DiarizationErrorRate(0.5),
+            "LocalDiarizationErrorRate/Confusion": SpeakerConfusionRate(0.5),
+            "LocalDiarizationErrorRate/Miss": MissedDetectionRate(0.5),
+            "LocalDiarizationErrorRate/FalseAlarm": FalseAlarmRate(0.5),
+        }
+
+    def normalize_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Normalize a tensor to have zero mean and unit variance."""
+        mean = tensor.mean(dim=-1, keepdim=True)
+        std = tensor.std(dim=-1, keepdim=True)
+        return (tensor - mean) / (std + 1e-8)  # Add epsilon to prevent division by zero
