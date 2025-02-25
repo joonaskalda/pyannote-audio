@@ -1339,51 +1339,6 @@ class JointSpeakerDiarizationAndEmbedding(SpeakerDiarization):
             # generate random chunk
             yield next(chunks)
 
-    def val__getitem__(self, idx) -> Dict:
-        """Validation items are generated so that all the chunks in a batch come from the same
-        validation file. These chunks are extracted regularly over all the file, so that the first
-        chunk start at the very beginning of the file, and the last chunk ends at the end of the file.
-        Step between chunks depends of the file duration and the total batch duration. This step can
-        be negative. In that case, chunks are overlapped.
-
-        Parameters
-        ----------
-        idx: int
-            item index. Note: this method may be incompatible with the use of sampler,
-            as this method requires incremental idx starting from 0.
-
-        Returns
-        -------
-        chunk: dict
-            extracted chunk from current validation file. The first chunk contains annotation
-            for the whole file.
-        """
-        # seems to be working kinda slow overall...
-        # how does it work with annotated regions?
-        file_idx = idx // self.batch_size
-        chunk_idx = idx % self.batch_size
-
-        file_id = self.prepared_data["validation-files-diar"][file_idx]
-        file = next(
-            itertools.islice(self.protocol.development(), file_idx, file_idx + 1)
-        )
-
-        file_duration = file.get(
-            "duration", Audio("downmix").get_duration(file["audio"])
-        )
-        start_time = chunk_idx * (
-            (file_duration - self.duration) / (self.batch_size - 1)
-        )
-
-        chunk = self.prepare_chunk(file_id, start_time, self.duration)
-
-        if chunk_idx == 0:
-            chunk["annotation"] = file["annotation"]
-
-        chunk["start_time"] = start_time
-
-        return chunk
-
     def collate_y_val(self, batch) -> torch.Tensor:
         """
         Parameters
