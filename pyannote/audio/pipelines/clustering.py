@@ -318,7 +318,7 @@ class AgglomerativeClustering(BaseClustering):
         )
 
         # minimum cluster size
-        self.min_cluster_size = Integer(1, 20)
+        self.min_cluster_size = Integer(15, 60)
 
     def cluster(
         self,
@@ -491,13 +491,16 @@ class KMeansClustering(BaseClustering):
     def __init__(
         self,
         metric: str = "cosine",
+        constrained_assignment: bool = False,
+        num_init: int = 100,
     ):
         if metric not in ["cosine", "euclidean"]:
             raise ValueError(
                 f"Unsupported metric: {metric}. Must be 'cosine' or 'euclidean'."
             )
 
-        super().__init__(metric=metric)
+        super().__init__(metric=metric, constrained_assignment=constrained_assignment)
+        self.num_init = num_init
 
     def cluster(
         self,
@@ -536,7 +539,7 @@ class KMeansClustering(BaseClustering):
 
         # perform Kmeans clustering
         return KMeans(
-            n_clusters=num_clusters, n_init=3, random_state=42, copy_x=False
+            n_clusters=num_clusters, n_init=self.num_init, random_state=42, copy_x=False
         ).fit_predict(embeddings)
 
 
